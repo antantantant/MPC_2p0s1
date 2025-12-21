@@ -1,0 +1,11 @@
+# Core numerical / ML stack
+torch>=2.2
+numpy>=1.24
+matplotlib>=3.7
+
+# Testing
+pytest>=8.0
+
+# Optional: type checking and formatting (you can remove these if you prefer)
+mypy>=1.8
+black>=24.0
