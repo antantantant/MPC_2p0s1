@@ -19,7 +19,7 @@ class HexnerParams:
 
     The continuous-time game is described in Hexner (1979) and revisited in the
     2p0s1 paper as a canonical example with an analytical NE and a critical
-    “reveal time” t_r.  [oai_citation:1‡16010_Solving_Football_by_Expl-2.pdf](sediment://file_000000001b0871f58cd1c91b483083b4)
+    “reveal time” t_r.
 
     This dataclass gathers the numeric choices for a discrete-time approximation
     used as a minimal test case in this codebase.
@@ -32,15 +32,26 @@ class HexnerParams:
     target_z:
         Base target vector z ∈ R^{dx1}. The actual target for type θ_i is
         z_i = θ_i * z. We usually concentrate z on position coordinates.
+        If None, we set z = (0, 1, 0, 0) for dx1 = 4.
     R1_scale, R2_scale:
         Scalars controlling the running costs:
             ∥u1∥^2_{R1} - ∥u2∥^2_{R2}.
-        We internally translate this into ℓ_i(u, v) = 0.5 u^T R_i u - 0.5 v^T S_i v
-        with R_i = 2 R1, S_i = 2 R2.
+        By default we use
+            R1_base = diag(0.05, 0.025),
+            R2_base = diag(0.05, 0.10),
+        and set
+            R1 = R1_scale * R1_base,
+            R2 = R2_scale * R2_base.
+        Internally we encode ℓ_i(u, v) = 0.5 u^T R_i u - 0.5 v^T S_i v with
+        R_i = 2 R1, S_i = 2 R2.
     K1_scale, K2_scale:
         Scalars controlling the terminal costs:
             ∥x1(T) - zθ∥^2_{K1} - ∥x2(T) - zθ∥^2_{K2}.
-        We use K1 = K1_scale * I_{dx1}, K2 = K2_scale * I_{dx1} by default.
+        By default we use position-only penalties
+            K_base = diag(1, 1, 0, 0),
+        and set
+            K1 = K1_scale * K_base,
+            K2 = K2_scale * K_base.
     """
 
     theta_values: Iterable[float] = (-1.0, 1.0)
@@ -48,15 +59,15 @@ class HexnerParams:
 
     R1_scale: float = 1.0
     R2_scale: float = 1.0
-    K1_scale: float = 10.0
-    K2_scale: float = 10.0
+    K1_scale: float = 1.0
+    K2_scale: float = 1.0
 
 
 class HexnerGame(BaseLQGame):
     """
     Discrete-time LQ implementation of Hexner’s game in 2D.
 
-    Structure (following the 2p0s1 paper’s formulation of Hexner’s game):  [oai_citation:2‡16010_Solving_Football_by_Expl-2.pdf](sediment://file_000000001b0871f58cd1c91b483083b4)
+    Structure (following the 2p0s1 paper’s formulation of Hexner’s game):
 
     - Two players j = 1,2 with double-integrator dynamics in 2D:
         state x_j = (pos_x, pos_y, vel_x, vel_y) ∈ R^4,
@@ -191,8 +202,18 @@ class HexnerGame(BaseLQGame):
         # ------------------------------------------------------------------ #
         # Running cost matrices R_i, S_i                                    #
         # ------------------------------------------------------------------ #
-        R1 = params.R1_scale * torch.eye(cfg.du, device=device, dtype=dtype)
-        R2 = params.R2_scale * torch.eye(cfg.dv, device=device, dtype=dtype)
+        # Base running losses from the football paper (2D Hexner):
+        #   R1_base = diag(0.05, 0.025)
+        #   R2_base = diag(0.05, 0.10)
+        R1_base = torch.diag(
+            torch.tensor([0.05, 0.025], device=device, dtype=dtype)
+        )
+        R2_base = torch.diag(
+            torch.tensor([0.05, 0.10], device=device, dtype=dtype)
+        )
+
+        R1 = params.R1_scale * R1_base
+        R2 = params.R2_scale * R2_base
 
         # To match ℓ_i(u,v) = ∥u1∥^2_{R1} - ∥v∥^2_{R2} when plugged into 0.5 u^T R u
         # we set R_i = 2 R1, S_i = 2 R2.
@@ -205,8 +226,13 @@ class HexnerGame(BaseLQGame):
         # ------------------------------------------------------------------ #
         # Terminal cost matrices Q_i, q_i, c_i                              #
         # ------------------------------------------------------------------ #
-        K1 = params.K1_scale * torch.eye(cfg.dx1, device=device, dtype=dtype)
-        K2 = params.K2_scale * torch.eye(cfg.dx1, device=device, dtype=dtype)
+        # Base terminal penalties: position-only, same for both players
+        #   K_base = diag(1, 1, 0, 0)
+        K_base = torch.diag(
+            torch.tensor([1.0, 1.0, 0.0, 0.0], device=device, dtype=dtype)
+        )
+        K1 = params.K1_scale * K_base  # (dx1, dx1)
+        K2 = params.K2_scale * K_base  # (dx1, dx1)
 
         # Base quadratic form for g_i(x):
         #   g_i(x) = ||x1 - z θ_i||^2_{K1} - ||x2 - z θ_i||^2_{K2}.
@@ -269,17 +295,30 @@ class HexnerGame(BaseLQGame):
         """
         Default initial state x0 for Hexner’s game.
 
-        We place both players at the origin with zero velocity:
+        We place P1 at (-1, 0) with zero velocity and P2 at (+1, 0) with zero
+        velocity:
 
-            x1 = (0, 0, 0, 0),  x2 = (0, 0, 0, 0),
+            x1 = (-1, 0, 0, 0),  x2 = (1, 0, 0, 0),
 
-        so x0 ∈ R^8 is all zeros.
+        so x0 ∈ R^8 is the concatenation of these two 4D states.
         """
-        return torch.zeros(self.dx, device=self.device_resolved, dtype=self.dtype)
+        x0 = torch.zeros(self.dx, device=self.device_resolved, dtype=self.dtype)
+        # P1: indices 0..3
+        x0[0] = -1.0  # pos_x
+        x0[1] = 0.0   # pos_y
+        x0[2] = 0.0   # vel_x
+        x0[3] = 0.0   # vel_y
+        # P2: indices 4..7
+        x0[4] = 1.0   # pos_x
+        x0[5] = 0.0   # pos_y
+        x0[6] = 0.0   # vel_x
+        x0[7] = 0.0   # vel_y
+        return x0
 
     def default_prior(self) -> Tensor:
         """
-        Default prior p0 over types: uniform over θ-values."""
+        Default prior p0 over types: uniform over θ-values.
+        """
         return self._p0_default.clone()
 
     # Optional helpers for visualization / analysis ------------------------ #

@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import os
+import time
 from typing import Optional
 
+import numpy as np
 import torch
 
 from ..config.base_config import GameConfig, TrainingConfig, PathsConfig
@@ -95,11 +97,25 @@ def run_outer_optimization(
     use_amp = train_cfg.use_mixed_precision and device.type == "cuda"
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
+    # Metrics history (for saving to metrics.npz)
+    steps_hist = []
+    losses_hist = []
+    fwd_times_hist = []   # forward (LQ + loss assembly)
+    bwd_times_hist = []   # backward (grad α + masking + clipping)
+    total_times_hist = [] # full outer iteration
+
     # Main optimization loop
     for step in range(start_step, train_cfg.max_iters):
+        step_t0 = time.perf_counter()
+        fwd_time = 0.0
+        bwd_time = 0.0
+
         def closure_lbfgs():
+            nonlocal fwd_time, bwd_time
             optimizer.zero_grad(set_to_none=True)
-            with torch.cuda.amp.autocast(enabled=False):  # LBFGS + AMP is tricky; keep FP32.
+            # LBFGS + AMP is tricky; keep FP32 here.
+            with torch.cuda.amp.autocast(enabled=False):
+                fwd_t0 = time.perf_counter()
                 loss_val = primal_objective(
                     game=game,
                     alpha_module=alpha_module,
@@ -109,6 +125,10 @@ def run_outer_optimization(
                     action_space=action_space,
                     return_details=False,
                 )
+                fwd_t1 = time.perf_counter()
+            fwd_time += (fwd_t1 - fwd_t0)
+
+            bwd_t0 = time.perf_counter()
             loss_val.backward()
 
             # Apply depth mask if any
@@ -121,6 +141,9 @@ def run_outer_optimization(
                     alpha_module.parameters(),
                     max_norm=train_cfg.grad_clip_norm,
                 )
+            bwd_t1 = time.perf_counter()
+            bwd_time += (bwd_t1 - bwd_t0)
+
             return loss_val
 
         optimizer_name = train_cfg.optimizer.lower()
@@ -130,6 +153,7 @@ def run_outer_optimization(
         else:
             optimizer.zero_grad(set_to_none=True)
             with torch.cuda.amp.autocast(enabled=use_amp):
+                fwd_t0 = time.perf_counter()
                 loss = primal_objective(
                     game=game,
                     alpha_module=alpha_module,
@@ -139,7 +163,10 @@ def run_outer_optimization(
                     action_space=action_space,
                     return_details=False,
                 )
+                fwd_t1 = time.perf_counter()
+            fwd_time = fwd_t1 - fwd_t0
 
+            bwd_t0 = time.perf_counter()
             scaler.scale(loss).backward()
 
             # Apply depth mask if any
@@ -155,10 +182,23 @@ def run_outer_optimization(
                     max_norm=train_cfg.grad_clip_norm,
                 )
 
+            bwd_t1 = time.perf_counter()
+            bwd_time = bwd_t1 - bwd_t0
+
             scaler.step(optimizer)
             scaler.update()
 
+        step_t1 = time.perf_counter()
+        total_time = step_t1 - step_t0
+
         loss_val = float(loss.item())
+
+        # Record metrics
+        steps_hist.append(step)
+        losses_hist.append(loss_val)
+        fwd_times_hist.append(fwd_time)
+        bwd_times_hist.append(bwd_time)
+        total_times_hist.append(total_time)
 
         # Logging to stdout
         if (step % train_cfg.print_every) == 0 or step == train_cfg.max_iters - 1:
@@ -168,8 +208,15 @@ def run_outer_optimization(
             else:
                 depth_info = ""
             print(
-                f"[outer_opt] step={step:06d} loss={loss_val:.6f}"
-                f"{depth_info}"
+                "[outer_opt] step={step:06d} loss={loss:.6f} "
+                "fwd={fwd_ms:.1f}ms bwd={bwd_ms:.1f}ms total={tot_ms:.1f}ms{depth_info}".format(
+                    step=step,
+                    loss=loss_val,
+                    fwd_ms=1e3 * fwd_time,
+                    bwd_ms=1e3 * bwd_time,
+                    tot_ms=1e3 * total_time,
+                    depth_info=depth_info,
+                )
             )
 
         # Checkpointing
@@ -184,3 +231,15 @@ def run_outer_optimization(
                 train_cfg=train_cfg,
             )
             print(f"[outer_opt] Saved checkpoint to '{ckpt_path}'")
+
+    # Save metrics at the end of the run
+    metrics_path = os.path.join(paths_cfg.run_dir, "metrics.npz")
+    np.savez(
+        metrics_path,
+        steps=np.asarray(steps_hist, dtype=np.int64),
+        losses=np.asarray(losses_hist, dtype=np.float64),
+        fwd_times=np.asarray(fwd_times_hist, dtype=np.float64),
+        bwd_times=np.asarray(bwd_times_hist, dtype=np.float64),
+        total_times=np.asarray(total_times_hist, dtype=np.float64),
+    )
+    print(f"[outer_opt] Saved timing/loss metrics to '{metrics_path}'")

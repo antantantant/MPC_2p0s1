@@ -2,16 +2,9 @@
 from __future__ import annotations
 
 import argparse
-import os
+import time
 
 import torch
-
-from MPC_2p0s1.config.base_config import GameConfig, TrainingConfig, PathsConfig
-from MPC_2p0s1.core.action_spaces import BoxActionSpace
-from MPC_2p0s1.games.hexner_game import HexnerGame, HexnerParams
-from MPC_2p0s1.outer_opt.alpha_param import AlphaParam, AlphaParamConfig
-from MPC_2p0s1.outer_opt.optimizer_loop import run_outer_optimization
-from MPC_2p0s1.tree.indexing import FullIaryTreeIndexer
 
 from MPC_2p0s1.config.base_config import (
     GameConfig,
@@ -19,20 +12,21 @@ from MPC_2p0s1.config.base_config import (
     PathsConfig,
     project_relative,
 )
+from MPC_2p0s1.core.action_spaces import BoxActionSpace
+from MPC_2p0s1.games.hexner_game import HexnerGame, HexnerParams
+from MPC_2p0s1.outer_opt.alpha_param import AlphaParam, AlphaParamConfig
+from MPC_2p0s1.outer_opt.optimizer_loop import run_outer_optimization
+from MPC_2p0s1.tree.indexing import FullIaryTreeIndexer
+
 
 def build_configs_from_args(args: argparse.Namespace):
     """
     Construct GameConfig, TrainingConfig, and PathsConfig objects from CLI args.
-
-    This helper keeps the main() function clean and makes it easy to adapt
-    configs as the codebase evolves.
     """
     # --- GameConfig ------------------------------------------------------ #
-    # Start from defaults (so new fields get sensible values) and override.
     game_cfg = GameConfig()
 
-    # Core problem dimensions: Hexner’s game is 2D double-integrator for each
-    # player, so dx1 = dx2 = 4 (pos_x, pos_y, vel_x, vel_y), and du = dv = 2.
+    # Hexner: 2D double-integrator per player
     game_cfg.I = args.I
     game_cfg.dx1 = 4
     game_cfg.dx2 = 4
@@ -51,7 +45,7 @@ def build_configs_from_args(args: argparse.Namespace):
     game_cfg.dtype = torch.float32
     game_cfg.seed = int(args.seed)
 
-    # Simple symmetric box constraints on actions; can be tuned via CLI.
+    # Action bounds
     game_cfg.u_min = float(args.u_min)
     game_cfg.u_max = float(args.u_max)
     game_cfg.v_min = float(args.v_min)
@@ -67,22 +61,26 @@ def build_configs_from_args(args: argparse.Namespace):
     train_cfg.checkpoint_every = int(args.checkpoint_every)
 
     train_cfg.use_mixed_precision = bool(args.mixed_precision)
-    train_cfg.grad_clip_norm = float(args.grad_clip_norm) if args.grad_clip_norm is not None else None
+    train_cfg.grad_clip_norm = (
+        float(args.grad_clip_norm) if args.grad_clip_norm is not None else None
+    )
 
     # Staged depth-wise optimization
     train_cfg.staged_depth = not args.no_staged_depth
     train_cfg.initial_unfrozen_depth = int(args.initial_unfrozen_depth)
     train_cfg.depth_increment = int(args.depth_increment)
     train_cfg.depth_increment_every = int(args.depth_increment_every)
-    train_cfg.max_unfrozen_depth = None if args.max_unfrozen_depth < 0 else int(args.max_unfrozen_depth)
+    train_cfg.max_unfrozen_depth = (
+        None if args.max_unfrozen_depth < 0 else int(args.max_unfrozen_depth)
+    )
 
     # --- PathsConfig ----------------------------------------------------- #
     run_root = project_relative(args.run_dir)
     paths_cfg = PathsConfig(
-            root_dir=run_root,
-            run_name="",
-            create_subdir=False,
-        )
+        root_dir=run_root,
+        run_name="",
+        create_subdir=False,
+    )
     paths_cfg.ensure_exists()
 
     return game_cfg, train_cfg, paths_cfg
@@ -108,7 +106,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Train the primal 2p0s1 solver (CAMS-MPC style) on Hexner’s game "
-            "using the tree-structured Riccati + α-optimization pipeline.  [oai_citation:1‡16010_Solving_Football_by_Expl-2.pdf](sediment://file_000000001b0871f58cd1c91b483083b4)"
+            "using the tree-structured Riccati + α-optimization pipeline."
         )
     )
 
@@ -232,7 +230,8 @@ def main() -> None:
         f"run_dir='{paths_cfg.run_dir}'"
     )
 
-    # Run outer optimization over α/logits
+    # Run outer optimization over α/logits with coarse total timing
+    t0 = time.perf_counter()
     run_outer_optimization(
         game=game,
         game_cfg=game_cfg,
@@ -246,6 +245,18 @@ def main() -> None:
         depth_schedule=None,  # constructed internally if staged_depth=True
         resume_from=None,
     )
+    t1 = time.perf_counter()
+
+    total_time = t1 - t0
+    print(
+        f"[train_hexner_primal] Total optimization time: {total_time:.2f} s "
+        f"(max_iters={train_cfg.max_iters})"
+    )
+    if train_cfg.max_iters > 0:
+        avg_ms = 1e3 * total_time / float(train_cfg.max_iters)
+        print(
+            f"[train_hexner_primal] Approx. average iteration time: {avg_ms:.1f} ms/iter"
+        )
 
 
 if __name__ == "__main__":
