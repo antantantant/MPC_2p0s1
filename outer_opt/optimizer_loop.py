@@ -7,6 +7,7 @@ from typing import Optional
 
 import numpy as np
 import torch
+from tqdm import tqdm
 
 from ..config.base_config import GameConfig, TrainingConfig, PathsConfig
 from ..core.utils import set_random_seeds
@@ -95,7 +96,7 @@ def run_outer_optimization(
         )
 
     use_amp = train_cfg.use_mixed_precision and device.type == "cuda"
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    scaler = torch.amp.GradScaler(enabled=use_amp)
 
     # Metrics history (for saving to metrics.npz)
     steps_hist = []
@@ -105,7 +106,7 @@ def run_outer_optimization(
     total_times_hist = [] # full outer iteration
 
     # Main optimization loop
-    for step in range(start_step, train_cfg.max_iters):
+    for step in tqdm(range(start_step, train_cfg.max_iters)):
         step_t0 = time.perf_counter()
         fwd_time = 0.0
         bwd_time = 0.0
@@ -152,7 +153,7 @@ def run_outer_optimization(
             loss = optimizer.step(closure_lbfgs)
         else:
             optimizer.zero_grad(set_to_none=True)
-            with torch.cuda.amp.autocast(enabled=use_amp):
+            with torch.amp.autocast(device_type=device.type, enabled=use_amp):
                 fwd_t0 = time.perf_counter()
                 loss = primal_objective(
                     game=game,

@@ -12,6 +12,7 @@ from MPC_2p0s1.config.base_config import (
     PathsConfig,
     project_relative,
 )
+
 from MPC_2p0s1.core.action_spaces import BoxActionSpace
 from MPC_2p0s1.games.hexner_game import HexnerGame, HexnerParams
 from MPC_2p0s1.outer_opt.alpha_param import AlphaParam, AlphaParamConfig
@@ -42,7 +43,7 @@ def build_configs_from_args(args: argparse.Namespace):
     # Device / dtype / random seed
     game_cfg.device = args.device
     game_cfg.device_resolved = torch.device(args.device)
-    game_cfg.dtype = torch.float32
+    game_cfg.dtype = torch.float32 # 32 is the default, but use 64 for better numerical stability 
     game_cfg.seed = int(args.seed)
 
     # Action bounds
@@ -196,7 +197,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--run-dir",
         type=str,
-        default="runs/hexner_primal",
+        default="runs/hexner_primal_test",
         help="Directory for checkpoints and logs.",
     )
 
