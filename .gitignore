@@ -54,3 +54,4 @@ checkpoints/
 # logs
 *.log
 *.python-version
+.ipynb_checkpoints/
