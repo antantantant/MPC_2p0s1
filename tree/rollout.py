@@ -142,7 +142,7 @@ def rollout_trajectory(
         if sample_actions:
             # Sample according to α_{k,ω,type}^a
             dist = torch.distributions.Categorical(probs=alpha_row)
-            a = dist.sample(generator=generator)
+            a = dist.sample()
         else:
             # Deterministic choice: argmax over prototypes
             a = torch.argmax(alpha_row)
@@ -150,14 +150,42 @@ def rollout_trajectory(
         a_int = int(a.item())
         proto_indices[k] = a
 
-        # Feedback gains for this edge
+        # ----------------------------------------------------------------
+        # Control computation with correct timing for belief revelation
+        # ----------------------------------------------------------------
+        # The feedback gain K_u is the same for all actions (since P and R
+        # are type-independent), so we can use the action-specific one.
         K_u_edge = riccati_sol.K_u[k][node_idx, a_int]        # (du, dx)
-        kappa_u_edge = riccati_sol.kappa_u[k][node_idx, a_int]  # (du,)
         K_v_edge = riccati_sol.K_v[k][node_idx, a_int]        # (dv, dx)
-        kappa_v_edge = riccati_sol.kappa_v[k][node_idx, a_int]  # (dv,)
+        
+        # IMPORTANT: We must AGGREGATE the feedforward terms (kappa_u, kappa_v)
+        # over actions using lambda_edge (edge probabilities from prior belief).
+        #
+        # BUG IN PREVIOUS CODE:
+        #   kappa_u_edge = riccati_sol.kappa_u[k][node_idx, a_int]
+        #   u = K_u_edge @ x + kappa_u_edge
+        #
+        # This used the action-specific kappa_u, which is computed from the
+        # child's value function at depth k+1. The child's value incorporates
+        # the POSTERIOR belief (after the action is observed), so the control
+        # at step k was using revealed information one time step too early.
+        #
+        # For example, with reveal at k=5:
+        #   - Belief at k=5 is [0.5, 0.5] (prior, not yet revealed)
+        #   - Belief at k=6 is [1, 0] (posterior, revealed)
+        #   - OLD: Control at k=5 used kappa_u from child with belief [1,0] → WRONG
+        #   - NEW: Control at k=5 uses aggregated kappa_u from prior [0.5,0.5] → CORRECT
+        #
+        # The fix: aggregate kappa_u over actions weighted by lambda_edge,
+        # which are the edge probabilities computed from the PRIOR belief.
+        lam_edge = belief_tree.lambda_edge[k][node_idx]       # (I,)
+        kappa_u_all = riccati_sol.kappa_u[k][node_idx]        # (I, du)
+        kappa_v_all = riccati_sol.kappa_v[k][node_idx]        # (I, dv)
+        kappa_u_agg = torch.einsum('a, ad -> d', lam_edge, kappa_u_all)  # (du,)
+        kappa_v_agg = torch.einsum('a, ad -> d', lam_edge, kappa_v_all)  # (dv,)
 
-        u = K_u_edge @ x + kappa_u_edge
-        v = K_v_edge @ x + kappa_v_edge
+        u = K_u_edge @ x + kappa_u_agg
+        v = K_v_edge @ x + kappa_v_agg
 
         if action_space is not None:
             u = action_space.clip_u(u)

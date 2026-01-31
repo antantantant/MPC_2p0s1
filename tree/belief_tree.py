@@ -153,6 +153,9 @@ def build_belief_tree(
                     # Posterior belief p_{k+1,ωa}[i] ∝ α_i^a p[i]
                     numer = alpha_k_node[:, a] * p  # (I,)
                     p_child = numer / lam_a
+
+                    # renormalize to ensure numerical stability
+                    p_child = p_child / p_child.sum()
                 else:
                     # Degenerate edge: retain parent belief (mass is ~0 anyway)
                     p_child = p

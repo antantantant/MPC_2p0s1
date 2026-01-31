@@ -50,3 +50,7 @@ checkpoints/
 *.pt
 *.pth
 *.ckpt
+
+# logs
+*.log
+*.python-version

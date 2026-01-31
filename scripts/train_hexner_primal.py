@@ -125,14 +125,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--R1-scale", type=float, default=1.0, help="Scale for P1 running-cost matrix R1.")
     parser.add_argument("--R2-scale", type=float, default=1.0, help="Scale for P2 running-cost matrix R2.")
-    parser.add_argument("--K1-scale", type=float, default=10.0, help="Scale for P1 terminal-cost matrix K1.")
-    parser.add_argument("--K2-scale", type=float, default=10.0, help="Scale for P2 terminal-cost matrix K2.")
+    parser.add_argument("--K1-scale", type=float, default=1.0, help="Scale for P1 terminal-cost matrix K1.")
+    parser.add_argument("--K2-scale", type=float, default=1.0, help="Scale for P2 terminal-cost matrix K2.")
 
     # Action bounds
-    parser.add_argument("--u-min", type=float, default=-4.0, help="Lower bound for P1 controls.")
-    parser.add_argument("--u-max", type=float, default=4.0, help="Upper bound for P1 controls.")
-    parser.add_argument("--v-min", type=float, default=-4.0, help="Lower bound for P2 controls.")
-    parser.add_argument("--v-max", type=float, default=4.0, help="Upper bound for P2 controls.")
+    parser.add_argument("--u-min", type=float, default=-14.0, help="Lower bound for P1 controls.")
+    parser.add_argument("--u-max", type=float, default=14.0, help="Upper bound for P1 controls.")
+    parser.add_argument("--v-min", type=float, default=-14.0, help="Lower bound for P2 controls.")
+    parser.add_argument("--v-max", type=float, default=14.0, help="Upper bound for P2 controls.")
 
     # Optimization hyperparameters
     parser.add_argument(
@@ -215,7 +215,7 @@ def main() -> None:
     game = HexnerGame(cfg=game_cfg, params=hexner_params)
 
     indexer = FullIaryTreeIndexer(I=game_cfg.I, K=args.K)
-    alpha_cfg = AlphaParamConfig(init_scale=0.01)
+    alpha_cfg = AlphaParamConfig(init_scale=0.1)
     alpha_module = AlphaParam(
         indexer=indexer,
         alpha_cfg=alpha_cfg,

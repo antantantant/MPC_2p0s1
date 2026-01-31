@@ -286,8 +286,138 @@ def _local_lq_saddle_batched(
     return P_loc, r_loc, c_loc, K_u, kappa_u, K_v, kappa_v
 
 
-@torch.compile(fullgraph=True)
-def riccati_backward(
+# @torch.compile(fullgraph=True)
+# def riccati_backward( # version 2
+#     game: BaseLQGame,
+#     belief_tree: BeliefTree,
+#     avg_costs: AveragedCostData,
+#     action_space: BoxActionSpace | None = None,
+# ) -> RiccatiSolution:
+#     """
+#     Run a tree-structured Riccati backward pass for fixed α.
+
+#     Vectorized version: all edges (k, ω, a) at a given depth k are processed
+#     in a single batched call, rather than Python loops over node_idx and a.
+#     """
+#     indexer: FullIaryTreeIndexer = belief_tree.indexer
+#     K = indexer.K
+#     I = indexer.I
+
+#     dx = game.dx
+#     du = game.du
+#     dv = game.dv
+#     tau = game.cfg.tau
+
+#     A = game.A
+#     B1 = game.B1
+#     B2 = game.B2
+
+#     device = game.device_resolved
+#     dtype = game.dtype
+
+#     # Node value storage: depth-major
+#     P_nodes: List[Tensor] = [None for _ in range(K + 1)]  # type: ignore
+#     r_nodes: List[Tensor] = [None for _ in range(K + 1)]  # type: ignore
+#     c_nodes: List[Tensor] = [None for _ in range(K + 1)]  # type: ignore
+
+#     # Initialize leaves (depth K) from avg_costs
+#     P_nodes[K] = avg_costs.P_leaf.clone()
+#     r_nodes[K] = avg_costs.r_leaf.clone()
+#     c_nodes[K] = avg_costs.c_leaf.clone()
+
+#     # Feedback storage for edges
+#     K_u: List[Tensor] = [None for _ in range(K)]           # type: ignore
+#     kappa_u: List[Tensor] = [None for _ in range(K)]       # type: ignore
+#     K_v: List[Tensor] = [None for _ in range(K)]           # type: ignore
+#     kappa_v: List[Tensor] = [None for _ in range(K)]       # type: ignore
+
+#     # Backward sweep over depths
+#     for k in reversed(range(K)):
+#         num_nodes = indexer.node_count(k)
+#         num_nodes_next = indexer.node_count(k + 1)
+
+#         P_next = P_nodes[k + 1]    # (num_nodes_next, dx, dx)
+#         r_next = r_nodes[k + 1]    # (num_nodes_next, dx)
+#         c_next = c_nodes[k + 1]    # (num_nodes_next,)
+
+#         R_bar_k = avg_costs.R_bar[k]           # (num_nodes, I, du, du)
+#         S_bar_k = avg_costs.S_bar[k]           # (num_nodes, I, dv, dv)
+#         lam_edge_k = belief_tree.lambda_edge[k]  # (num_nodes, I)
+
+#         # Precompute child indices for all (node_idx, a) at this depth
+#         # NOTE: if FullIaryTreeIndexer is laid out contiguously, you can
+#         # replace this with a purely tensor-based formula to avoid loops.
+#         children_idx = torch.empty(
+#             num_nodes, I, dtype=torch.long, device=device
+#         )
+#         for node_idx in range(num_nodes):
+#             for a in range(I):
+#                 child_idx = indexer.child_index(k, node_idx, a)
+#                 if not (0 <= child_idx < num_nodes_next):
+#                     raise RuntimeError(
+#                         f"Inconsistent tree indexing at depth {k}: "
+#                         f"child_idx={child_idx}, num_nodes_next={num_nodes_next}"
+#                     )
+#                 children_idx[node_idx, a] = child_idx
+
+#         # Gather next-step value parameters for all edges (k, ω, a)
+#         # Shapes: (num_nodes, I, ...)
+#         P_plus = P_next[children_idx]  # (num_nodes, I, dx, dx)
+#         r_plus = r_next[children_idx]  # (num_nodes, I, dx)
+#         c_plus = c_next[children_idx]  # (num_nodes, I)
+
+#         # Solve the local LQ saddle problem on all edges in one batched call
+#         (
+#             P_loc,       # (num_nodes, I, dx, dx)
+#             r_loc,       # (num_nodes, I, dx)
+#             c_loc,       # (num_nodes, I)
+#             K_u_k,       # (num_nodes, I, du, dx)
+#             kappa_u_k,   # (num_nodes, I, du)
+#             K_v_k,       # (num_nodes, I, dv, dx)
+#             kappa_v_k,   # (num_nodes, I, dv)
+#         ) = _local_lq_saddle_batched(
+#             A=A,
+#             B1=B1,
+#             B2=B2,
+#             tau=tau,
+#             R_bar=R_bar_k,
+#             S_bar=S_bar_k,
+#             P_plus=P_plus,
+#             r_plus=r_plus,
+#             c_plus=c_plus,
+#         )
+
+#         # Aggregate over child edges with weights λ_{k,ω}^a
+#         # P_k[node] = sum_a λ_{k,ω}^a P_loc[node, a]
+#         lam_P = lam_edge_k.unsqueeze(-1).unsqueeze(-1)      # (num_nodes, I, 1, 1)
+#         P_k = (lam_P * P_loc).sum(dim=1)                    # (num_nodes, dx, dx)
+
+#         lam_r = lam_edge_k.unsqueeze(-1)                    # (num_nodes, I, 1)
+#         r_k = (lam_r * r_loc).sum(dim=1)                    # (num_nodes, dx)
+
+#         c_k = (lam_edge_k * c_loc).sum(dim=1)               # (num_nodes,)
+
+#         P_nodes[k] = P_k
+#         r_nodes[k] = r_k
+#         c_nodes[k] = c_k
+
+#         K_u[k] = K_u_k
+#         kappa_u[k] = kappa_u_k
+#         K_v[k] = K_v_k
+#         kappa_v[k] = kappa_v_k
+
+#     return RiccatiSolution(
+#         P_nodes=P_nodes,
+#         r_nodes=r_nodes,
+#         c_nodes=c_nodes,
+#         K_u=K_u,
+#         kappa_u=kappa_u,
+#         K_v=K_v,
+#         kappa_v=kappa_v,
+#     )
+
+# @torch.compile(fullgraph=True)  # Temporarily disabled for testing
+def riccati_backward( # version 3
     game: BaseLQGame,
     belief_tree: BeliefTree,
     avg_costs: AveragedCostData,
@@ -334,7 +464,6 @@ def riccati_backward(
     # Backward sweep over depths
     for k in reversed(range(K)):
         num_nodes = indexer.node_count(k)
-        num_nodes_next = indexer.node_count(k + 1)
 
         P_next = P_nodes[k + 1]    # (num_nodes_next, dx, dx)
         r_next = r_nodes[k + 1]    # (num_nodes_next, dx)
@@ -344,21 +473,12 @@ def riccati_backward(
         S_bar_k = avg_costs.S_bar[k]           # (num_nodes, I, dv, dv)
         lam_edge_k = belief_tree.lambda_edge[k]  # (num_nodes, I)
 
-        # Precompute child indices for all (node_idx, a) at this depth
-        # NOTE: if FullIaryTreeIndexer is laid out contiguously, you can
-        # replace this with a purely tensor-based formula to avoid loops.
-        children_idx = torch.empty(
-            num_nodes, I, dtype=torch.long, device=device
-        )
-        for node_idx in range(num_nodes):
-            for a in range(I):
-                child_idx = indexer.child_index(k, node_idx, a)
-                if not (0 <= child_idx < num_nodes_next):
-                    raise RuntimeError(
-                        f"Inconsistent tree indexing at depth {k}: "
-                        f"child_idx={child_idx}, num_nodes_next={num_nodes_next}"
-                    )
-                children_idx[node_idx, a] = child_idx
+        # Vectorized child index computation for full I-ary tree:
+        # child_index(k, node_idx, a) = node_idx * I + a
+        node_indices = torch.arange(num_nodes, device=device, dtype=torch.long)  # (num_nodes,)
+        action_indices = torch.arange(I, device=device, dtype=torch.long)        # (I,)
+        # Broadcast: (num_nodes, 1) * I + (1, I) -> (num_nodes, I)
+        children_idx = node_indices.unsqueeze(1) * I + action_indices.unsqueeze(0)
 
         # Gather next-step value parameters for all edges (k, ω, a)
         # Shapes: (num_nodes, I, ...)
