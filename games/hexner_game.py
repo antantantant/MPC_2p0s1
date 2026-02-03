@@ -120,7 +120,24 @@ class HexnerGame(BaseLQGame):
     numerical choices (scales, exact z) are configurable via HexnerParams.
     """
 
-    def __init__(self, cfg: GameConfig, params: Optional[HexnerParams] = None) -> None:
+    def __init__(
+        self,
+        cfg: GameConfig,
+        params: Optional[HexnerParams] = None,
+        prior: Optional[Tensor] = None,
+    ) -> None:
+        """
+        Initialize the Hexner game.
+        
+        Parameters
+        ----------
+        cfg : GameConfig
+            Configuration containing dx1, dx2, du, dv, I, K, T, etc.
+        params : HexnerParams, optional
+            Game-specific parameters (theta values, cost scales).
+        prior : Tensor, optional
+            Prior distribution over types, shape (I,). If None, uniform prior is used.
+        """
         if cfg.dx1 != 4 or cfg.dx2 != 4 or cfg.du != 2 or cfg.dv != 2:
             raise ValueError(
                 "HexnerGame expects dx1=dx2=4 (2D pos+vel) and du=dv=2 (2D accel). "
@@ -282,9 +299,19 @@ class HexnerGame(BaseLQGame):
         self.register_buffer("_c", c_stack)
 
         # ------------------------------------------------------------------ #
-        # Default prior p0 (uniform over θ)                                  #
+        # Default prior p0                                                   #
         # ------------------------------------------------------------------ #
-        p0 = torch.full((cfg.I,), 1.0 / cfg.I, device=device, dtype=dtype)
+        # Use provided prior if available, otherwise uniform over θ
+        if prior is not None:
+            if prior.shape != (cfg.I,):
+                raise ValueError(
+                    f"HexnerGame: prior must have shape ({cfg.I},), got {tuple(prior.shape)}"
+                )
+            p0 = prior.to(device=device, dtype=dtype).clone()
+            # Normalize to ensure it sums to 1
+            p0 = p0 / p0.sum()
+        else:
+            p0 = torch.full((cfg.I,), 1.0 / cfg.I, device=device, dtype=dtype)
         self.register_buffer("_p0_default", p0)
 
     # ---------------------------------------------------------------------- #
