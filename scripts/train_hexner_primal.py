@@ -200,6 +200,7 @@ def parse_args() -> argparse.Namespace:
         default="runs/hexner_primal_test",
         help="Directory for checkpoints and logs.",
     )
+    parser.add_argument("--prior", type=float, default=0.5, help="Prior probability for type 1 (theta=-1) (type 2 prob = 1 - prior).")
 
     return parser.parse_args()
 
@@ -211,8 +212,10 @@ def main() -> None:
     game_cfg, train_cfg, paths_cfg = build_configs_from_args(args)
     hexner_params = build_hexner_params_from_args(args)
 
+    # prior tensor
+    prior = torch.tensor([args.prior, 1.0 - args.prior], dtype=game_cfg.dtype, device=game_cfg.device_resolved)
     # Instantiate game and structures
-    game = HexnerGame(cfg=game_cfg, params=hexner_params)
+    game = HexnerGame(cfg=game_cfg, params=hexner_params, prior=prior)
 
     indexer = FullIaryTreeIndexer(I=game_cfg.I, K=args.K)
     alpha_cfg = AlphaParamConfig(init_scale=0.1)
