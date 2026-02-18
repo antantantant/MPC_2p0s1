@@ -124,43 +124,44 @@ def build_belief_tree(
     for k in range(K):
         num_nodes = indexer.node_count(k)
         num_nodes_next = indexer.node_count(k + 1)
+        if num_nodes_next != num_nodes * I:
+            raise RuntimeError(
+                "build_belief_tree expects a full I-ary layout with "
+                f"num_nodes_next={num_nodes_next} == num_nodes*I={num_nodes * I}"
+            )
 
         b_k = beliefs[k]            # (num_nodes, I)
         lam_node_k = lambda_node[k] # (num_nodes,)
 
-        b_next = torch.zeros(num_nodes_next, I, device=device, dtype=dtype)
-        lam_node_next = torch.zeros(num_nodes_next, device=device, dtype=dtype)
-        lam_edge_k = torch.zeros(num_nodes, I, device=device, dtype=dtype)
+        # Only active nodes at this depth are used.
+        alpha_k = alpha[k, :num_nodes]  # (num_nodes, I(type), I(action))
 
-        for node_idx in range(num_nodes):
-            p = b_k[node_idx]                # (I,)
-            lam_node_val = lam_node_k[node_idx]
-            alpha_k_node = alpha[k, node_idx]  # (I, I): (type, action)
+        # Edge probabilities λ_{k,ω}^a = Σ_i α_{k,ω,i}^a p_{k,ω}[i]
+        # Shapes: (num_nodes, I)
+        lam_edge_k = torch.einsum("ni, nia -> na", b_k, alpha_k)
 
-            # Edge probabilities λ_{k,ω}^a = Σ_i α_i^a p[i]
-            lam_edge_vals = torch.matmul(p, alpha_k_node)  # (I,)
-            lam_edge_k[node_idx] = lam_edge_vals
+        # Path mass to children:
+        # λ_{k+1,ωa} = λ_{k,ω} * λ_{k,ω}^a
+        lam_child = lam_node_k.unsqueeze(-1) * lam_edge_k  # (num_nodes, I)
+        # child_index(k, node, a) = node * I + a, which matches row-major flatten.
+        lam_node_next = lam_child.reshape(num_nodes_next)
 
-            for a in range(I):
-                lam_a = lam_edge_vals[a]
-                child_idx = indexer.child_index(k, node_idx, a)
+        # Posterior beliefs for each child edge:
+        # p_{k+1,ωa}[i] ∝ α_{k,ω,i}^a * p_{k,ω}[i]
+        numer = alpha_k * b_k.unsqueeze(-1)        # (num_nodes, I(type), I(action))
+        numer = numer.permute(0, 2, 1)             # (num_nodes, I(action), I(type))
 
-                # Path mass to child
-                lam_child = lam_node_val * lam_a
-                lam_node_next[child_idx] = lam_child
+        safe_denom = lam_edge_k.clamp_min(eps).unsqueeze(-1)  # (num_nodes, I, 1)
+        b_child = numer / safe_denom
+        b_child = b_child / b_child.sum(dim=-1, keepdim=True).clamp_min(eps)
 
-                if lam_a > eps:
-                    # Posterior belief p_{k+1,ωa}[i] ∝ α_i^a p[i]
-                    numer = alpha_k_node[:, a] * p  # (I,)
-                    p_child = numer / lam_a
+        # Degenerate edge: retain parent belief (edge mass is ~0 anyway).
+        keep_parent = (lam_edge_k <= eps).unsqueeze(-1)       # (num_nodes, I, 1)
+        parent_expanded = b_k.unsqueeze(1).expand(-1, I, -1)  # (num_nodes, I, I(type))
+        b_child = torch.where(keep_parent, parent_expanded, b_child)
 
-                    # renormalize to ensure numerical stability
-                    p_child = p_child / p_child.sum()
-                else:
-                    # Degenerate edge: retain parent belief (mass is ~0 anyway)
-                    p_child = p
-
-                b_next[child_idx] = p_child
+        # child_index layout matches row-major flatten.
+        b_next = b_child.reshape(num_nodes_next, I)
 
         beliefs.append(b_next)
         lambda_node.append(lam_node_next)

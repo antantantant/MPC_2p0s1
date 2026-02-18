@@ -77,50 +77,35 @@ def compute_averaged_costs(
     # Running costs for edges k=0..K-1
     for k in range(K):
         num_nodes = indexer.node_count(k)
-        R_k = torch.empty(
-            num_nodes,
-            I,
-            du,
-            du,
-            device=device,
-            dtype=dtype,
-        )
-        S_k = torch.empty(
-            num_nodes,
-            I,
-            dv,
-            dv,
-            device=device,
-            dtype=dtype,
-        )
+        num_nodes_next = indexer.node_count(k + 1)
+        if num_nodes_next != num_nodes * I:
+            raise RuntimeError(
+                "compute_averaged_costs expects full I-ary indexing with "
+                f"num_nodes_next={num_nodes_next} == num_nodes*I={num_nodes * I}"
+            )
 
-        for node_idx in range(num_nodes):
-            for a in range(I):
-                child_idx = indexer.child_index(k, node_idx, a)
-                p_child = belief_tree.beliefs[k + 1][child_idx]  # (I,)
-                R_edge, S_edge = game.running_cost_mats(p_child)
-                R_k[node_idx, a] = R_edge
-                S_k[node_idx, a] = S_edge
+        # child_index(k, node, a) = node * I + a, so row-major reshape gives
+        # beliefs per edge (node, action, type).
+        p_next = belief_tree.beliefs[k + 1].reshape(num_nodes, I, I)  # (node, action, type)
+
+        # Belief-averaged running costs on all edges at once:
+        # (node, action, type) x (type, du, du) -> (node, action, du, du)
+        R_k = torch.einsum("nai, ibc -> nabc", p_next, game.R)
+        S_k = torch.einsum("nai, ibc -> nabc", p_next, game.S)
 
         R_bar.append(R_k)
         S_bar.append(S_k)
 
     # Terminal costs at leaves (depth K)
     num_leaves = indexer.node_count(K)
-    P_leaf = torch.empty(num_leaves, dx, dx, device=device, dtype=dtype)
-    r_leaf = torch.empty(num_leaves, dx, device=device, dtype=dtype)
-    c_leaf = torch.empty(num_leaves, device=device, dtype=dtype)
+    belief_leaves = belief_tree.beliefs[K]  # (num_leaves, I)
 
-    for node_idx in range(num_leaves):
-        belief_leaf = belief_tree.beliefs[K][node_idx]        # (I,)
-        # We treat terminal values as *conditional* on reaching the leaf;
-        # overall expectations are built by the Riccati recursion and the
-        # λ_{k,ω}^a aggregation, not by baking λ into P,r,c here.
-        node_mass = torch.ones((), device=device, dtype=dtype)
-        vq = game.terminal_value_quad(belief_leaf, node_mass=node_mass)
-        P_leaf[node_idx] = vq.P
-        r_leaf[node_idx] = vq.r
-        c_leaf[node_idx] = vq.c
+    # We use conditional terminal values at each leaf (node mass = 1).
+    # terminal_value_quad with node_mass=1 gives:
+    # P = sum_i p[i] Q_i, r = sum_i p[i] q_i, c = sum_i p[i] c_i.
+    P_leaf = torch.einsum("ni, iab -> nab", belief_leaves, game.Q)  # (num_leaves, dx, dx)
+    r_leaf = torch.einsum("ni, ia -> na", belief_leaves, game.q)    # (num_leaves, dx)
+    c_leaf = torch.einsum("ni, i -> n", belief_leaves, game.c)      # (num_leaves,)
 
     return AveragedCostData(
         R_bar=R_bar,
