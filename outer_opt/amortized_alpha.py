@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Dict, Iterable, Optional, Sequence, Tuple
+import warnings
 
 import torch
 from torch import nn
@@ -13,6 +14,8 @@ from ..tree.averaged_costs import compute_averaged_costs
 from ..tree.belief_tree import BeliefTree, build_belief_tree
 from ..tree.indexing import FullIaryTreeIndexer
 from ..tree.riccati_tree import RiccatiSolution, riccati_backward
+
+_VMAP_DISABLED = False
 
 
 @dataclass
@@ -211,6 +214,9 @@ def amortized_batch_objective(
     p0_batch: Tensor,
     action_space: Optional[BoxActionSpace] = None,
     reduction: str = "mean",
+    vectorize: bool = True,
+    vmap_chunk_size: Optional[int] = None,
+    strict_vectorize: bool = False,
 ) -> Tensor:
     """
     Evaluate the amortized objective over a mini-batch of (x0, p0) contexts.
@@ -218,20 +224,60 @@ def amortized_batch_objective(
     alpha_batch = alpha_model(x0=x0_batch, p0=p0_batch)
     batch_size = alpha_batch.shape[0]
 
-    losses: list[Tensor] = []
-    for b in range(batch_size):
-        loss_b = primal_objective_from_alpha(
+    def _single_loss(alpha: Tensor, x0: Tensor, p0: Tensor) -> Tensor:
+        return primal_objective_from_alpha(
             game=game,
-            alpha=alpha_batch[b],
+            alpha=alpha,
             indexer=indexer,
-            x0=x0_batch[b],
-            p0=p0_batch[b],
+            x0=x0,
+            p0=p0,
             action_space=action_space,
             return_details=False,
         )
-        losses.append(loss_b)
 
-    loss_vec = torch.stack(losses, dim=0)
+    def _loop_eval() -> Tensor:
+        losses: list[Tensor] = []
+        for b in range(batch_size):
+            losses.append(_single_loss(alpha_batch[b], x0_batch[b], p0_batch[b]))
+        return torch.stack(losses, dim=0)
+
+    global _VMAP_DISABLED
+
+    if vectorize and not _VMAP_DISABLED:
+        try:
+            from torch.func import vmap
+
+            if vmap_chunk_size is None or int(vmap_chunk_size) <= 0:
+                vmap_chunk_size = batch_size
+
+            chunk = int(vmap_chunk_size)
+            loss_chunks: list[Tensor] = []
+            vmapped_single = vmap(_single_loss, in_dims=(0, 0, 0))
+            for start in range(0, batch_size, chunk):
+                end = min(start + chunk, batch_size)
+                loss_chunks.append(
+                    vmapped_single(
+                        alpha_batch[start:end],
+                        x0_batch[start:end],
+                        p0_batch[start:end],
+                    )
+                )
+            loss_vec = torch.cat(loss_chunks, dim=0) if len(loss_chunks) > 1 else loss_chunks[0]
+        except Exception as exc:
+            if strict_vectorize:
+                raise
+            _VMAP_DISABLED = True
+            warnings.warn(
+                "amortized_batch_objective: vectorized path failed; falling back to "
+                "looped evaluation for subsequent calls. "
+                f"Error: {type(exc).__name__}: {exc}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            loss_vec = _loop_eval()
+    else:
+        loss_vec = _loop_eval()
+
     key = reduction.lower()
     if key == "mean":
         return loss_vec.mean()
@@ -240,4 +286,3 @@ def amortized_batch_objective(
     if key == "none":
         return loss_vec
     raise ValueError(f"Unsupported reduction '{reduction}'. Expected mean, sum, or none.")
-
