@@ -158,10 +158,16 @@ def rollout_trajectory(
         K_u_edge = riccati_sol.K_u[k][node_idx, a_int]        # (du, dx)
         K_v_edge = riccati_sol.K_v[k][node_idx, a_int]        # (dv, dx)
         
+        kappa_u_edge = riccati_sol.kappa_u[k][node_idx, a_int]    # (du,)
+        kappa_v_edge = riccati_sol.kappa_v[k][node_idx, a_int]    # (dv,)
+        u = K_u_edge @ x + kappa_u_edge
+        v = K_v_edge @ x + kappa_v_edge
+
+        ## UPDATE: Aggregation is FUNDAMENTALLY WRONG!! CHECK GT WITH CONT. GAME
         # IMPORTANT: We must AGGREGATE the feedforward terms (kappa_u, kappa_v)
         # over actions using lambda_edge (edge probabilities from prior belief).
         #
-        # BUG IN PREVIOUS CODE:
+        # PREVIOUS CODE IMPLEMENTS PRIMAL GAME
         #   kappa_u_edge = riccati_sol.kappa_u[k][node_idx, a_int]
         #   u = K_u_edge @ x + kappa_u_edge
         #
@@ -176,16 +182,16 @@ def rollout_trajectory(
         #   - OLD: Control at k=5 used kappa_u from child with belief [1,0] → WRONG
         #   - NEW: Control at k=5 uses aggregated kappa_u from prior [0.5,0.5] → CORRECT
         #
-        # The fix: aggregate kappa_u over actions weighted by lambda_edge,
+        # The "fix": We can project this to make it non-anticipative: aggregate kappa_u over actions weighted by lambda_edge,
         # which are the edge probabilities computed from the PRIOR belief.
-        lam_edge = belief_tree.lambda_edge[k][node_idx]       # (I,)
-        kappa_u_all = riccati_sol.kappa_u[k][node_idx]        # (I, du)
-        kappa_v_all = riccati_sol.kappa_v[k][node_idx]        # (I, dv)
-        kappa_u_agg = torch.einsum('a, ad -> d', lam_edge, kappa_u_all)  # (du,)
-        kappa_v_agg = torch.einsum('a, ad -> d', lam_edge, kappa_v_all)  # (dv,)
+        # lam_edge = belief_tree.lambda_edge[k][node_idx]       # (I,)
+        # kappa_u_all = riccati_sol.kappa_u[k][node_idx]        # (I, du)
+        # kappa_v_all = riccati_sol.kappa_v[k][node_idx]        # (I, dv)
+        # kappa_u_agg = torch.einsum('a, ad -> d', lam_edge, kappa_u_all)  # (du,)
+        # kappa_v_agg = torch.einsum('a, ad -> d', lam_edge, kappa_v_all)  # (dv,)
 
-        u = K_u_edge @ x + kappa_u_agg
-        v = K_v_edge @ x + kappa_v_agg
+        # u = K_u_edge @ x + kappa_u_agg
+        # v = K_v_edge @ x + kappa_v_agg
 
         if action_space is not None:
             u = action_space.clip_u(u)
