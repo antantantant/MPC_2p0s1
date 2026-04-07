@@ -1,0 +1,2 @@
+{"epoch": 0, "loss": -4.640188092024934e-05, "grad_norm": 0.001245024616881742, "elapsed_s": 0.10701298713684082, "sqp_converged": true, "sqp_converged_iter": 1, "sqp_nan": false, "sqp_cost_last": -4.640188092024934e-05, "sqp_du_last": 0.0, "sqp_dv_last": 0.0}
+{"epoch": 1, "loss": -0.00038796957964755467, "grad_norm": 0.004380424715654684, "elapsed_s": 0.19465017318725586, "sqp_converged": true, "sqp_converged_iter": 1, "sqp_nan": false, "sqp_cost_last": -0.00038796957964755467, "sqp_du_last": 0.0, "sqp_dv_last": 0.0}

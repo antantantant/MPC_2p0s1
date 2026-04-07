@@ -1,0 +1,33 @@
+{
+  "I": 2,
+  "T": 1.0,
+  "K": 10,
+  "theta_values": [
+    -1.0,
+    1.0
+  ],
+  "R1_scale": 1.0,
+  "R2_scale": 1.0,
+  "K1_scale": 1.0,
+  "K2_scale": 1.0,
+  "dtype": "float64",
+  "device": "cpu",
+  "sqp_iters": 2,
+  "sqp_step_size": 1.0,
+  "riccati_reg": 0.001,
+  "max_riccati_reg_tries": 5,
+  "riccati_reg_factor": 10.0,
+  "line_search": true,
+  "ls_alpha_min": 0.05,
+  "ls_backtrack": 0.5,
+  "ls_max_steps": 6,
+  "allow_worse_step": false,
+  "epochs": 2,
+  "lr": 0.01,
+  "alpha_init_scale": 0.01,
+  "grad_clip": 10.0,
+  "warmstart": true,
+  "u_max": 4.0,
+  "v_max": 4.0,
+  "seed": 42
+}

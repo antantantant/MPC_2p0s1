@@ -1,0 +1,7 @@
+numpy
+scipy
+matplotlib
+torch
+pyyaml
+pytest
+seaborn
