@@ -19,6 +19,7 @@ try:
     import matplotlib.pyplot as plt
     from matplotlib.figure import Figure
     from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
     _HAS_MPL = True
 except ImportError:
@@ -35,14 +36,65 @@ class AnimationConfig:
     figsize: Tuple[int, int] = (10, 8)
     elev: float = 25.0
     azim: float = -45.0
-    colors_p1: str = "tab:blue"
-    colors_p2: str = "tab:red"
+    colors_p1: str = "tab:red"
+    colors_p2: str = "tab:blue"
     target_colors: Tuple[str, ...] = ("green", "orange")
     axis_limit: float = 4.0
     auto_view: bool = True
     view_margin: float = 0.20
     min_axis_span: float = 1.0
     azim_step_deg: float = 10.0
+
+
+def _add_xy_rect_3d(ax: object, *, x0: float, y0: float, width: float, height: float, z: float, color: str, alpha: float, edgecolor: Optional[str] = None, linewidth: float = 1.0) -> None:
+    verts = [[
+        (x0, y0, z),
+        (x0 + width, y0, z),
+        (x0 + width, y0 + height, z),
+        (x0, y0 + height, z),
+    ]]
+    poly = Poly3DCollection(verts, facecolors=color, edgecolors=edgecolor or color, linewidths=linewidth, alpha=alpha)
+    ax.add_collection3d(poly)
+
+
+def _add_xy_outline_3d(ax: object, *, xmin: float, xmax: float, ymin: float, ymax: float, z: float, color: str = "black", linewidth: float = 1.8, alpha: float = 0.8) -> None:
+    xs = [xmin, xmax, xmax, xmin, xmin]
+    ys = [ymin, ymin, ymax, ymax, ymin]
+    zs = [z, z, z, z, z]
+    ax.plot(xs, ys, zs, color=color, linewidth=linewidth, alpha=alpha)
+
+
+def _add_hexner_mod_context(ax: object, *, target_positions: np.ndarray) -> None:
+    if target_positions.shape[0] < 2 or target_positions.shape[1] < 2:
+        return
+
+    z_plane = float(target_positions[0, 2]) if target_positions.shape[1] >= 3 else 0.0
+    t0 = target_positions[0]
+    t1 = target_positions[1]
+    _add_xy_rect_3d(
+        ax,
+        x0=float(t0[0] - 0.8),
+        y0=float(t0[1] - 0.12),
+        width=1.6,
+        height=0.24,
+        z=z_plane,
+        color="tab:red",
+        alpha=0.16,
+        edgecolor="tab:red",
+        linewidth=1.0,
+    )
+    _add_xy_rect_3d(
+        ax,
+        x0=float(t1[0] - 0.12),
+        y0=float(t1[1] - 0.8),
+        width=0.24,
+        height=1.6,
+        z=z_plane,
+        color="tab:blue",
+        alpha=0.16,
+        edgecolor="tab:blue",
+        linewidth=1.0,
+    )
 
 
 def _rotation_matrix_zyx(phi: float, theta: float, psi: float) -> np.ndarray:
@@ -141,6 +193,7 @@ def plot_trajectories(
     title: str = "Quadrotor trajectories",
     cfg: Optional[AnimationConfig] = None,
     save_path: Optional[str] = None,
+    payoff_model: Optional[str] = None,
 ) -> "Figure":
     """Plot 3-D trajectories of both drones and optional belief panel."""
     if not _HAS_MPL:
@@ -172,17 +225,18 @@ def plot_trajectories(
     p1 = x_np[:, :3]
     p2 = x_np[:, dx_single : dx_single + 3]
 
-    ax.plot(p1[:, 0], p1[:, 1], p1[:, 2], "-o", color=cfg.colors_p1, label="P1", markersize=3)
-    ax.plot(p2[:, 0], p2[:, 1], p2[:, 2], "-s", color=cfg.colors_p2, label="P2", markersize=3)
-    ax.scatter(*p1[0], marker="^", s=cfg.drone_size, color=cfg.colors_p1, zorder=5)
-    ax.scatter(*p1[-1], marker="v", s=cfg.drone_size, color=cfg.colors_p1, zorder=5)
-    ax.scatter(*p2[0], marker="^", s=cfg.drone_size, color=cfg.colors_p2, zorder=5)
-    ax.scatter(*p2[-1], marker="v", s=cfg.drone_size, color=cfg.colors_p2, zorder=5)
+    ax.plot(p1[:, 0], p1[:, 1], p1[:, 2], "-", color=cfg.colors_p1, label="P1 path", linewidth=1.8)
+    ax.plot(p2[:, 0], p2[:, 1], p2[:, 2], "-", color=cfg.colors_p2, label="P2 path", linewidth=1.8)
+    ax.scatter(*p1[0], marker="o", s=cfg.drone_size, facecolors="white", edgecolors=cfg.colors_p1, linewidths=2.0, zorder=6, label="P1 start")
+    ax.scatter(*p1[-1], marker="X", s=cfg.drone_size * 1.15, color=cfg.colors_p1, edgecolors="black", linewidths=0.8, zorder=7, label="P1 end")
+    ax.scatter(*p2[0], marker="o", s=cfg.drone_size, facecolors="white", edgecolors=cfg.colors_p2, linewidths=2.0, zorder=6, label="P2 start")
+    ax.scatter(*p2[-1], marker="X", s=cfg.drone_size * 1.15, color=cfg.colors_p2, edgecolors="black", linewidths=0.8, zorder=7, label="P2 end")
 
     tgt_np: Optional[np.ndarray] = None
     if target_positions is not None:
         tgt_np = target_positions.detach().cpu().numpy()
-        for i, c in enumerate(cfg.target_colors[: tgt_np.shape[0]]):
+        target_colors = ("tab:red", "tab:blue") if payoff_model == "hexner_mod" else cfg.target_colors
+        for i, c in enumerate(target_colors[: tgt_np.shape[0]]):
             ax.scatter(
                 tgt_np[i, 0],
                 tgt_np[i, 1],
@@ -199,6 +253,8 @@ def plot_trajectories(
         elev, azim = _auto_camera_angles(view_points, cfg)
     ax.view_init(elev=elev, azim=azim)
     _apply_axes_limits(ax, view_points, cfg)
+    if payoff_model == "hexner_mod" and tgt_np is not None:
+        _add_hexner_mod_context(ax, target_positions=tgt_np)
 
     ax.set_xlabel("x")
     ax.set_ylabel("y")
@@ -233,6 +289,7 @@ def animate_rollout(
     title: str = "Quadrotor game rollout",
     cfg: Optional[AnimationConfig] = None,
     save_path: Optional[str] = None,
+    payoff_model: Optional[str] = None,
 ) -> "animation.FuncAnimation":
     """Create a 3-D animation of both drones and optional belief panel."""
     if not _HAS_MPL:
@@ -271,7 +328,8 @@ def animate_rollout(
     tgt_np: Optional[np.ndarray] = None
     if target_positions is not None:
         tgt_np = target_positions.detach().cpu().numpy()
-        for i, c in enumerate(cfg.target_colors[: tgt_np.shape[0]]):
+        target_colors = ("tab:red", "tab:blue") if payoff_model == "hexner_mod" else cfg.target_colors
+        for i, c in enumerate(target_colors[: tgt_np.shape[0]]):
             ax.scatter(
                 tgt_np[i, 0],
                 tgt_np[i, 1],
@@ -288,16 +346,22 @@ def animate_rollout(
         elev, azim = _auto_camera_angles(view_points, cfg)
     ax.view_init(elev=elev, azim=azim)
     _apply_axes_limits(ax, view_points, cfg)
+    if payoff_model == "hexner_mod" and tgt_np is not None:
+        _add_hexner_mod_context(ax, target_positions=tgt_np)
 
     ax.set_xlabel("x")
     ax.set_ylabel("y")
     ax.set_zlabel("z")
     ax.set_title(title)
 
-    trail1, = ax.plot([], [], [], "-", color=cfg.colors_p1, alpha=0.6, linewidth=1.6)
-    trail2, = ax.plot([], [], [], "-", color=cfg.colors_p2, alpha=0.6, linewidth=1.6)
-    drone1 = ax.scatter([], [], [], s=cfg.drone_size, color=cfg.colors_p1, depthshade=False, label="P1")
-    drone2 = ax.scatter([], [], [], s=cfg.drone_size, color=cfg.colors_p2, depthshade=False, label="P2")
+    trail1, = ax.plot([], [], [], "-", color=cfg.colors_p1, alpha=0.6, linewidth=1.6, label="P1 path")
+    trail2, = ax.plot([], [], [], "-", color=cfg.colors_p2, alpha=0.6, linewidth=1.6, label="P2 path")
+    start1 = ax.scatter([p1[0, 0]], [p1[0, 1]], [p1[0, 2]], s=cfg.drone_size, facecolors="white", edgecolors=cfg.colors_p1, linewidths=2.0, depthshade=False, label="P1 start")
+    end1 = ax.scatter([p1[-1, 0]], [p1[-1, 1]], [p1[-1, 2]], s=cfg.drone_size * 1.15, color=cfg.colors_p1, edgecolors="black", linewidths=0.8, depthshade=False, label="P1 end")
+    start2 = ax.scatter([p2[0, 0]], [p2[0, 1]], [p2[0, 2]], s=cfg.drone_size, facecolors="white", edgecolors=cfg.colors_p2, linewidths=2.0, depthshade=False, label="P2 start")
+    end2 = ax.scatter([p2[-1, 0]], [p2[-1, 1]], [p2[-1, 2]], s=cfg.drone_size * 1.15, color=cfg.colors_p2, edgecolors="black", linewidths=0.8, depthshade=False, label="P2 end")
+    drone1 = ax.scatter([], [], [], s=cfg.drone_size, color=cfg.colors_p1, depthshade=False, label="P1 current")
+    drone2 = ax.scatter([], [], [], s=cfg.drone_size, color=cfg.colors_p2, depthshade=False, label="P2 current")
 
     arm = cfg.arm_len_plot
     arm1_lines = [ax.plot([], [], [], color=cfg.colors_p1, lw=2)[0] for _ in range(2)] if has_attitude else []
@@ -356,6 +420,10 @@ def animate_rollout(
         artists: list[object] = [
             trail1,
             trail2,
+            start1,
+            end1,
+            start2,
+            end2,
             drone1,
             drone2,
             time_text,

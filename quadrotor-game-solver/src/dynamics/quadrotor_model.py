@@ -121,7 +121,8 @@ def _single_quadrotor_dynamics(
     dvz = thrust_per_mass * (cth * cphi) - g
 
     # ── Euler-angle derivatives ──
-    cth_safe = cth.clamp(min=1e-6)
+    eps = torch.as_tensor(1e-6, device=cth.device, dtype=cth.dtype)
+    cth_safe = torch.where(cth.abs() < eps, torch.where(cth >= 0, eps, -eps), cth)
     tth = sth / cth_safe
 
     dphi   = wx + (wy * sphi + wz * cphi) * tth

@@ -59,17 +59,26 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sample-actions", action="store_true")
     p.add_argument("--visualize", action="store_true")
     p.add_argument("--animate", action="store_true")
+    p.add_argument("--show", action="store_true",
+                   help="Open interactive matplotlib window(s) for visual inspection.")
 
     p.add_argument("--sqp-iters", type=int, default=10)
     p.add_argument("--sqp-step-size", type=float, default=0.1)
     p.add_argument("--riccati-reg", type=float, default=0.5)
-    p.add_argument("--ls-alpha-min", type=float, default=0.01)
-    p.add_argument("--ls-backtrack", type=float, default=0.5)
-    p.add_argument("--ls-max-steps", type=int, default=8)
-    p.add_argument("--allow-worse-step", action="store_true")
+    p.add_argument("--ls-alpha-min", type=float, default=None)
+    p.add_argument("--ls-backtrack", type=float, default=None)
+    p.add_argument("--ls-max-steps", type=int, default=None)
+    group = p.add_mutually_exclusive_group()
+    group.add_argument("--allow-worse-step", dest="allow_worse_step", action="store_true")
+    group.add_argument("--disallow-worse-step", dest="allow_worse_step", action="store_false")
+    p.set_defaults(allow_worse_step=None)
 
     p.add_argument("--u-max", type=float, default=20.0)
     p.add_argument("--v-max", type=float, default=20.0)
+    p.add_argument("--u-torque-max", type=float, default=1.5,
+                   help="Rigid-body only: per-axis torque bound for P1.")
+    p.add_argument("--v-torque-max", type=float, default=1.5,
+                   help="Rigid-body only: per-axis torque bound for P2.")
     p.add_argument("--no-action-clamp", action="store_true")
     p.add_argument("--prior", type=float, default=0.5)
 
@@ -90,6 +99,7 @@ def _rebuild_game_config(meta: Dict[str, object]) -> GameConfig:
         T=float(meta.get("T", 2.0)),
         K=int(meta.get("K", 5)),
         dynamics_model=str(meta.get("dynamics_model", "rigid_body")),
+        payoff_model=str(meta.get("payoff_model", "hexner")),
         integrator=str(meta.get("integrator", "euler")),
         control_cost_mode=str(meta.get("control_cost_mode", "hover_relative")),
         line_search_accept_worse=bool(meta.get("line_search_accept_worse", False)),
@@ -100,6 +110,15 @@ def _rebuild_game_config(meta: Dict[str, object]) -> GameConfig:
         K1_scale=float(meta.get("K1_scale", 1.0)),
         K2_scale=float(meta.get("K2_scale", 1.0)),
         theta_values=tuple(meta.get("theta_values", (-1.0, 1.0))),       # type: ignore[arg-type]
+        target_z=(
+            None if meta.get("target_z") is None
+            else tuple(meta.get("target_z"))  # type: ignore[arg-type]
+        ),
+        hexner_mod_type_state_weights=(
+            None
+            if meta.get("hexner_mod_type_state_weights") is None
+            else tuple(tuple(row) for row in meta.get("hexner_mod_type_state_weights"))
+        ),
         interception_state_weights=tuple(
             meta.get(
                 "interception_state_weights",
@@ -161,6 +180,26 @@ def load_checkpoint_and_config(
     return cfg, {"alpha_state_dict": payload}, cfg_meta
 
 
+
+
+def _apply_solver_defaults(args: argparse.Namespace, cfg_meta: Dict[str, object]) -> None:
+    """Fill unset eval-time SQP args from the checkpoint config."""
+    if args.sqp_iters is None:
+        args.sqp_iters = int(cfg_meta.get("sqp_iters", 3))
+    if args.sqp_step_size is None:
+        args.sqp_step_size = float(cfg_meta.get("sqp_step_size", 1.0))
+    if args.riccati_reg is None:
+        args.riccati_reg = float(cfg_meta.get("riccati_reg", 1e-3))
+    if args.ls_alpha_min is None:
+        args.ls_alpha_min = float(cfg_meta.get("ls_alpha_min", 0.01))
+    if args.ls_backtrack is None:
+        args.ls_backtrack = float(cfg_meta.get("ls_backtrack", 0.5))
+    if args.ls_max_steps is None:
+        args.ls_max_steps = int(cfg_meta.get("ls_max_steps", 8))
+    if args.allow_worse_step is None:
+        args.allow_worse_step = bool(cfg_meta.get("allow_worse_step", False))
+
+
 def build_action_space(
     *,
     args: argparse.Namespace,
@@ -169,10 +208,20 @@ def build_action_space(
     if args.no_action_clamp:
         return None
 
-    u_lo, u_hi, v_lo, v_hi = game.action_box_bounds(
-        u_max=float(args.u_max),
-        v_max=float(args.v_max),
-    )
+    if getattr(game.cfg, "dynamics_model", "rigid_body") == "rigid_body":
+        u_lo, u_hi, v_lo, v_hi = game.action_box_bounds(
+            u_max=float(args.u_max),
+            v_max=float(args.v_max),
+        )
+        u_lo[1:] = -float(args.u_torque_max)
+        u_hi[1:] = float(args.u_torque_max)
+        v_lo[1:] = -float(args.v_torque_max)
+        v_hi[1:] = float(args.v_torque_max)
+    else:
+        u_lo, u_hi, v_lo, v_hi = game.action_box_bounds(
+            u_max=float(args.u_max),
+            v_max=float(args.v_max),
+        )
 
     return BoxActionSpace(u_min=u_lo, u_max=u_hi, v_min=v_lo, v_max=v_hi)
 
@@ -414,9 +463,12 @@ def mpc_rollout_for_type(
 
 def main() -> None:
     args = parse_args()
+    if args.show and not (args.visualize or args.animate):
+        args.visualize = True
     torch.manual_seed(args.seed)
 
     cfg, payload, cfg_meta = load_checkpoint_and_config(args)
+    _apply_solver_defaults(args, cfg_meta)
     if args.device is not None:
         cfg = GameConfig(
             I=cfg.I,
@@ -481,7 +533,7 @@ def main() -> None:
                 game=game,
                 full_indexer=indexer,
                 alpha_full=alpha_full,
-                x0=x0,
+                x0=x0.clone(),
                 p0=p0,
                 type_index=type_idx,
                 rollout_steps=rollout_steps,
@@ -635,8 +687,11 @@ def main() -> None:
 
     if args.visualize or args.animate:
         try:
+            import matplotlib.pyplot as plt
             from src.utils.visualization import animate_rollout, plot_trajectories
 
+            live_figures = []
+            live_animations = []
             for i, ro in enumerate(rollouts):
                 type_idx = i // args.num_rollouts_per_type
                 run_idx = i % args.num_rollouts_per_type
@@ -648,17 +703,27 @@ def main() -> None:
                         target_positions=game.type_target_positions(),
                         title=title,
                         save_path=str(output_dir / f"traj_type{type_idx}_run{run_idx}.png"),
+                        payoff_model=game.cfg.payoff_model,
                     )
-                    fig.clear()
+                    if args.show:
+                        live_figures.append(fig)
+                    else:
+                        plt.close(fig)
                 if args.animate:
-                    animate_rollout(
+                    anim = animate_rollout(
                         ro.x_traj,
                         dt=cfg.tau,
                         belief_traj=ro.belief_traj,
                         target_positions=game.type_target_positions(),
                         title=title,
                         save_path=str(output_dir / f"anim_type{type_idx}_run{run_idx}.mp4"),
+                        payoff_model=game.cfg.payoff_model,
                     )
+                    if args.show:
+                        live_animations.append(anim)
+            if args.show:
+                print("[eval_mpc] Opening interactive matplotlib window(s).")
+                plt.show()
         except ImportError:
             print("[eval_mpc] matplotlib not available — skipping visualisation.")
 

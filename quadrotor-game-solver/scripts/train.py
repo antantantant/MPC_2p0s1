@@ -65,7 +65,14 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="rigid_body",
         choices=["rigid_body", "interception"],
-        help="Dynamics/game model: full rigid-body quadrotor or jerk-integrator interception model.",
+        help="Dynamics model: full rigid-body quadrotor or jerk-integrator interception model.",
+    )
+    p.add_argument(
+        "--payoff-model",
+        type=str,
+        default="hexner",
+        choices=["hexner", "hexner_mod"],
+        help="Terminal payoff model: standard Hexner or Hexner-mod.",
     )
     p.add_argument("--integrator", type=str, default="rk4",
                    choices=["euler", "rk4"],
@@ -91,10 +98,10 @@ def parse_args() -> argparse.Namespace:
                    help="Comma-separated running-cost diag for P1. Defaults are model-specific.")
     p.add_argument("--R2-diag", type=str, default=None,
                    help="Comma-separated running-cost diag for P2. Defaults are model-specific.")
-    p.add_argument("--K1-scale", type=float, default=10.0,
-                   help="Scale for P1 terminal-cost matrix.")
-    p.add_argument("--K2-scale", type=float, default=10.0,
-                   help="Scale for P2 terminal-cost matrix.")
+    p.add_argument("--K1-scale", type=float, default=None,
+                   help="Scale for P1 terminal-cost matrix. Defaults are payoff-model specific.")
+    p.add_argument("--K2-scale", type=float, default=None,
+                   help="Scale for P2 terminal-cost matrix. Defaults are payoff-model specific.")
     p.add_argument(
         "--interception-state-weights",
         type=str,
@@ -131,6 +138,10 @@ def parse_args() -> argparse.Namespace:
                    help="Disable action-space clamping.")
     p.add_argument("--u-max", type=float, default=20.0)
     p.add_argument("--v-max", type=float, default=20.0)
+    p.add_argument("--u-torque-max", type=float, default=1.5,
+                   help="Rigid-body only: per-axis torque bound for P1.")
+    p.add_argument("--v-torque-max", type=float, default=1.5,
+                   help="Rigid-body only: per-axis torque bound for P2.")
 
     # ── Prior ───────────────────────────────────────────────────────
     p.add_argument("--prior", type=float, default=0.5,
@@ -161,22 +172,25 @@ def build_game_config(args: argparse.Namespace) -> GameConfig:
     theta_vals = tuple(float(v) for v in args.theta_values.split(","))
     if args.game_model == "interception":
         r1_default = (1.0, 1.0, 1.0)
-        r2_default = (1.0, 1.0, 1.0)
+        r2_default = (0.4, 0.4, 0.4) if args.payoff_model == "hexner_mod" else (1.0, 1.0, 1.0)
     else:
         r1_default = (0.05, 0.025, 0.025, 0.01)
-        r2_default = (0.05, 0.10, 0.10, 0.02)
+        r2_default = (0.02, 0.04, 0.04, 0.008) if args.payoff_model == "hexner_mod" else (0.05, 0.10, 0.10, 0.02)
 
     r1 = tuple(float(v) for v in (args.R1_diag.split(",") if args.R1_diag else r1_default))
     r2 = tuple(float(v) for v in (args.R2_diag.split(",") if args.R2_diag else r2_default))
     interception_state_weights = tuple(
         float(v) for v in args.interception_state_weights.split(",")
     )
+    k1_scale = 1.0 if args.K1_scale is None and args.payoff_model == "hexner_mod" else (10.0 if args.K1_scale is None else float(args.K1_scale))
+    k2_scale = 1.0 if args.K2_scale is None and args.payoff_model == "hexner_mod" else (10.0 if args.K2_scale is None else float(args.K2_scale))
 
     return GameConfig(
         I=args.I,
         T=args.T,
         K=args.K,
         dynamics_model=args.game_model,
+        payoff_model=args.payoff_model,
         integrator=args.integrator,
         linearized_mode=args.linearized,
         control_cost_mode=args.control_cost_mode,
@@ -185,8 +199,8 @@ def build_game_config(args: argparse.Namespace) -> GameConfig:
         dtype=dtype,
         R1_diag=r1,
         R2_diag=r2,
-        K1_scale=args.K1_scale,
-        K2_scale=args.K2_scale,
+        K1_scale=k1_scale,
+        K2_scale=k2_scale,
         theta_values=theta_vals,
         interception_state_weights=interception_state_weights,
     )
@@ -200,10 +214,20 @@ def build_action_space(
     if args.no_action_clamp:
         return None
 
-    u_lo, u_hi, v_lo, v_hi = game.action_box_bounds(
-        u_max=float(args.u_max),
-        v_max=float(args.v_max),
-    )
+    if getattr(game.cfg, "dynamics_model", "rigid_body") == "rigid_body":
+        u_lo, u_hi, v_lo, v_hi = game.action_box_bounds(
+            u_max=float(args.u_max),
+            v_max=float(args.v_max),
+        )
+        u_lo[1:] = -float(args.u_torque_max)
+        u_hi[1:] = float(args.u_torque_max)
+        v_lo[1:] = -float(args.v_torque_max)
+        v_hi[1:] = float(args.v_torque_max)
+    else:
+        u_lo, u_hi, v_lo, v_hi = game.action_box_bounds(
+            u_max=float(args.u_max),
+            v_max=float(args.v_max),
+        )
 
     return BoxActionSpace(u_min=u_lo, u_max=u_hi, v_min=v_lo, v_max=v_hi)
 
@@ -591,6 +615,7 @@ def run_eval(
                 target_positions=target_positions,
                 title=f"Type {type_idx} (θ={theta_i:+.1f})",
                 save_path=str(run_dir / f"traj_type{type_idx}.png"),
+                payoff_model=game.cfg.payoff_model,
             )
             plt_imported = True
         except ImportError:
@@ -607,6 +632,7 @@ def run_eval(
                     target_positions=target_positions,
                     title=f"Type {type_idx} (θ={theta_i:+.1f})",
                     save_path=str(run_dir / f"anim_type{type_idx}.mp4"),
+                    payoff_model=game.cfg.payoff_model,
                 )
             except Exception as e:
                 print(f"    Animation failed (ffmpeg needed): {e}")
@@ -645,7 +671,9 @@ def main() -> None:
 
     # ── Run directory ────────────────────────────────────────────────
     if args.run_dir is None:
-        run_stub = "interception_game" if cfg.dynamics_model == "interception" else "quadrotor_game"
+        run_stub = cfg.dynamics_model
+        if cfg.payoff_model != "hexner":
+            run_stub = f"{run_stub}_{cfg.payoff_model}"
         run_dir = Path("runs") / run_stub
     else:
         run_dir = Path(args.run_dir)
@@ -660,7 +688,7 @@ def main() -> None:
     # ── Print summary ────────────────────────────────────────────────
     print(f"[train] Game: {cfg.game_name}")
     print(f"  T={cfg.T:.2f}  K={cfg.K}  I={cfg.I}  tau={cfg.tau:.4f}")
-    print(f"  dynamics_model={cfg.dynamics_model}")
+    print(f"  dynamics_model={cfg.dynamics_model}  payoff_model={cfg.payoff_model}")
     print(f"  dx_joint={game.dx}  du={game.du}  dv={game.dv}")
     print(
         f"  integrator={cfg.integrator}  dtype={cfg.dtype}  "
@@ -681,6 +709,7 @@ def main() -> None:
     config_dict = {
         "T": cfg.T, "K": cfg.K, "I": cfg.I,
         "dynamics_model": cfg.dynamics_model,
+        "payoff_model": cfg.payoff_model,
         "integrator": cfg.integrator,
         "control_cost_mode": cfg.control_cost_mode,
         "line_search_accept_worse": cfg.line_search_accept_worse,
@@ -690,6 +719,12 @@ def main() -> None:
         "K1_scale": cfg.K1_scale, "K2_scale": cfg.K2_scale,
         "interception_state_weights": list(cfg.interception_state_weights),
         "theta_values": list(cfg.theta_values),
+        "target_z": list(cfg.target_z) if cfg.target_z is not None else None,
+        "hexner_mod_type_state_weights": (
+            [list(row) for row in cfg.hexner_mod_type_state_weights]
+            if cfg.hexner_mod_type_state_weights is not None
+            else None
+        ),
         "lr": args.lr, "epochs": args.epochs,
         "sqp_iters": args.sqp_iters,
         "sqp_step_size": args.sqp_step_size,
@@ -701,6 +736,7 @@ def main() -> None:
         "alpha_init_scale": args.alpha_init_scale,
         "prior": args.prior,
         "u_max": args.u_max, "v_max": args.v_max,
+        "u_torque_max": args.u_torque_max, "v_torque_max": args.v_torque_max,
         "eval_cold_start_every": args.eval_cold_start_every,
         "checkpoint_selection_policy": "last_checkpoint",
         "gate_min_separation": args.gate_min_separation,

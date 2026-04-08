@@ -124,8 +124,10 @@ def rollout_correctness_metrics(
         terminal_ok = bool(true_d < other_d)
         consistency_flags.append(terminal_ok)
 
-        min_alt_p1 = min(min_alt_p1, float(ro.x_traj[:, 2].min().item()))
-        min_alt_p2 = min(min_alt_p2, float(ro.x_traj[:, 14].min().item()))
+        p1_hist = game.player_position(ro.x_traj, 0)
+        p2_hist = game.player_position(ro.x_traj, 1)
+        min_alt_p1 = min(min_alt_p1, float(p1_hist[:, 2].min().item()))
+        min_alt_p2 = min(min_alt_p2, float(p2_hist[:, 2].min().item()))
 
         per_type.append(
             {

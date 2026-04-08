@@ -1,0 +1,201 @@
+{
+  "checkpoint": "runs/mod_game_drone/final_checkpoint.pt",
+  "solve_mode": "cold_start",
+  "cold_start_loss": 27.17170985750929,
+  "warm_start_loss": null,
+  "selected_loss": 27.17170985750929,
+  "correctness": {
+    "metrics": {
+      "alpha": {
+        "separated_nodes": 728,
+        "total_nodes": 1023,
+        "separation_fraction": 0.7116324535679375,
+        "type_path_divergence_step": 2
+      },
+      "rollouts": [
+        {
+          "type_index": 0,
+          "theta": -1.0,
+          "p1_final_pos": [
+            -1.1443687538187683,
+            -0.8562183338182546,
+            0.5116167984664586
+          ],
+          "p2_final_pos": [
+            -0.34917923282137875,
+            -0.9585729554239378,
+            -1.323377385545017
+          ],
+          "dist_true_target_p1": 0.5506970610800932,
+          "dist_best_other_target_p1": 2.8819464956224192,
+          "terminal_target_consistent": true,
+          "finite": true,
+          "proto_indices": [
+            0,
+            1,
+            1,
+            0,
+            0,
+            1,
+            0,
+            0,
+            1,
+            1
+          ]
+        },
+        {
+          "type_index": 1,
+          "theta": 1.0,
+          "p1_final_pos": [
+            0.06472711610433085,
+            0.9867206884299836,
+            -1.0990631761917102
+          ],
+          "p2_final_pos": [
+            1.1533184751433365,
+            0.7026142128882907,
+            0.5743004657205162
+          ],
+          "dist_true_target_p1": 1.4432087765555286,
+          "dist_best_other_target_p1": 2.507716648838972,
+          "terminal_target_consistent": true,
+          "finite": true,
+          "proto_indices": [
+            0,
+            1,
+            0,
+            0,
+            1,
+            0,
+            0,
+            0,
+            1,
+            0
+          ]
+        }
+      ],
+      "terminal_consistency_rate": 1.0,
+      "all_finite": true,
+      "min_altitude_p1": -1.0990631761917102,
+      "min_altitude_p2": -1.323377385545017,
+      "altitude_floor": -5.0,
+      "physical_plausible": true
+    },
+    "gates": {
+      "separation_ok": true,
+      "terminal_consistency_ok": true,
+      "physical_plausible_ok": true
+    },
+    "passed": true
+  },
+  "rollouts": [
+    {
+      "rollout_idx": 0,
+      "type_index": 0,
+      "theta": -1.0,
+      "p1_final_pos": [
+        -1.1443687538187683,
+        -0.8562183338182546,
+        0.5116167984664586
+      ],
+      "p2_final_pos": [
+        -0.34917923282137875,
+        -0.9585729554239378,
+        -1.323377385545017
+      ],
+      "p1_control_effort": 0.0969067261465826,
+      "p2_control_effort": 1.0712179153712227,
+      "final_belief": [
+        0.9999999907496846,
+        9.25031536844482e-09
+      ]
+    },
+    {
+      "rollout_idx": 1,
+      "type_index": 1,
+      "theta": 1.0,
+      "p1_final_pos": [
+        0.06472711610433085,
+        0.9867206884299836,
+        -1.0990631761917102
+      ],
+      "p2_final_pos": [
+        1.1533184751433365,
+        0.7026142128882907,
+        0.5743004657205162
+      ],
+      "p1_control_effort": 5.061329579650185,
+      "p2_control_effort": 0.16855782468341335,
+      "final_belief": [
+        3.6560061452586304e-07,
+        0.9999996343993854
+      ]
+    }
+  ],
+  "config_meta": {
+    "T": 1.0,
+    "K": 10,
+    "I": 2,
+    "dynamics_model": "rigid_body",
+    "payoff_model": "hexner_mod",
+    "integrator": "rk4",
+    "control_cost_mode": "hover_relative",
+    "line_search_accept_worse": false,
+    "dtype": "torch.float64",
+    "device": "cpu",
+    "R1_diag": [
+      0.05,
+      0.025,
+      0.025,
+      0.01
+    ],
+    "R2_diag": [
+      0.02,
+      0.04,
+      0.04,
+      0.008
+    ],
+    "K1_scale": 1.0,
+    "K2_scale": 1.0,
+    "interception_state_weights": [
+      1.0,
+      1.0,
+      1.0,
+      0.25,
+      0.25,
+      0.25,
+      0.1,
+      0.1,
+      0.1
+    ],
+    "theta_values": [
+      -1.0,
+      1.0
+    ],
+    "target_z": null,
+    "hexner_mod_type_state_weights": null,
+    "lr": 0.005,
+    "epochs": 2000,
+    "sqp_iters": 4,
+    "sqp_step_size": 0.05,
+    "riccati_reg": 0.5,
+    "ls_alpha_min": 0.01,
+    "ls_backtrack": 0.5,
+    "ls_max_steps": 8,
+    "allow_worse_step": false,
+    "alpha_init_scale": 0.01,
+    "prior": 0.5,
+    "u_max": 20.0,
+    "v_max": 20.0,
+    "u_torque_max": 1.5,
+    "v_torque_max": 1.5,
+    "eval_cold_start_every": 0,
+    "checkpoint_selection_policy": "last_checkpoint",
+    "gate_min_separation": 0.05,
+    "gate_min_terminal_consistency": 0.5,
+    "altitude_floor": -5.0,
+    "seed": 42,
+    "config_fingerprint": "3d27a4049b7553b5f8fadb16ac36d50c70de126359e110e53d91a78582cb5a0e"
+  },
+  "config_fingerprint": "b6b9491e098d7090fd9d3c049a09638c7f1b9f3f73b8a9bd0ae91a74f72baa7b"
+}

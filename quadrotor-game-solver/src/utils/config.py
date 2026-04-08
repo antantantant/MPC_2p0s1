@@ -62,6 +62,7 @@ class GameConfig:
     # ── Physics ──────────────────────────────────────────────────────
     quad_params: QuadrotorParams = field(default_factory=QuadrotorParams)
     dynamics_model: str = "rigid_body"  # "rigid_body" or "interception"
+    payoff_model: str = "hexner"       # "hexner" or "hexner_mod"
 
     # ── Integrator ───────────────────────────────────────────────────
     integrator: str = "euler"           # "euler" or "rk4"
@@ -100,6 +101,7 @@ class GameConfig:
     K2_scale: float = 1.0
     theta_values: Tuple[float, ...] = (-1.0, 1.0)
     target_z: Optional[Tuple[float, ...]] = None
+    hexner_mod_type_state_weights: Optional[Tuple[Tuple[float, ...], ...]] = None
     interception_state_weights: Tuple[float, ...] = (
         1.0, 1.0, 1.0,
         0.25, 0.25, 0.25,
@@ -137,6 +139,11 @@ class GameConfig:
             raise ValueError(
                 "dynamics_model must be one of {'rigid_body', 'interception'}, "
                 f"got {self.dynamics_model!r}"
+            )
+        if self.payoff_model not in {"hexner", "hexner_mod"}:
+            raise ValueError(
+                "payoff_model must be one of {'hexner', 'hexner_mod'}, "
+                f"got {self.payoff_model!r}"
             )
 
 

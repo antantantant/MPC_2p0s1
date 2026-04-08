@@ -42,6 +42,12 @@ def parse_args() -> argparse.Namespace:
         default="rigid_body",
         choices=["rigid_body", "interception"],
     )
+    p.add_argument(
+        "--payoff-model",
+        type=str,
+        default="hexner",
+        choices=["hexner", "hexner_mod"],
+    )
     p.add_argument("--integrator", type=str, default="euler",
                    choices=["euler", "rk4"])
     p.add_argument("--dtype", type=str, default="float64",
@@ -65,6 +71,10 @@ def parse_args() -> argparse.Namespace:
                    help="Disable action-space clamping")
     p.add_argument("--u-max", type=float, default=20.0)
     p.add_argument("--v-max", type=float, default=20.0)
+    p.add_argument("--u-torque-max", type=float, default=1.5,
+                   help="Rigid-body only: per-axis torque bound for P1.")
+    p.add_argument("--v-torque-max", type=float, default=1.5,
+                   help="Rigid-body only: per-axis torque bound for P2.")
 
     # ── Logging ──────────────────────────────────────────────────────
     p.add_argument("--run-dir", type=str, default=None)
@@ -85,14 +95,24 @@ def main() -> None:
     device = args.device
 
     # ── Game setup ───────────────────────────────────────────────────
+    if args.game_model == "interception":
+        r1_diag = (1.0, 1.0, 1.0)
+        r2_diag = (0.4, 0.4, 0.4) if args.payoff_model == "hexner_mod" else (1.0, 1.0, 1.0)
+    else:
+        r1_diag = (0.05, 0.025, 0.025, 0.01)
+        r2_diag = (0.02, 0.04, 0.04, 0.008) if args.payoff_model == "hexner_mod" else (0.05, 0.10, 0.10, 0.02)
+
     cfg = GameConfig(
         T=args.T,
         K=args.K,
         I=args.I,
         dynamics_model=args.game_model,
+        payoff_model=args.payoff_model,
         integrator=args.integrator,
         dtype=dtype,
         device=device,
+        R1_diag=r1_diag,
+        R2_diag=r2_diag,
     )
     game = build_game(cfg)
     indexer = FullIaryTreeIndexer(I=cfg.I, K=cfg.K)
@@ -119,6 +139,11 @@ def main() -> None:
             u_max=float(args.u_max),
             v_max=float(args.v_max),
         )
+        if cfg.dynamics_model == "rigid_body":
+            u_lo[1:] = -float(args.u_torque_max)
+            u_hi[1:] = float(args.u_torque_max)
+            v_lo[1:] = -float(args.v_torque_max)
+            v_hi[1:] = float(args.v_torque_max)
         action_space = BoxActionSpace(u_min=u_lo, u_max=u_hi,
                                       v_min=v_lo, v_max=v_hi)
         print(f"  action bounds u: [{u_lo.tolist()}, {u_hi.tolist()}]")
@@ -147,6 +172,8 @@ def main() -> None:
     # Save config
     config_dict = {
         "T": cfg.T, "K": cfg.K, "I": cfg.I,
+        "dynamics_model": cfg.dynamics_model,
+        "payoff_model": cfg.payoff_model,
         "integrator": cfg.integrator,
         "dtype": str(dtype), "device": device,
         "lr": args.lr, "epochs": args.epochs,
