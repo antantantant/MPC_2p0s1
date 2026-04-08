@@ -18,8 +18,9 @@ from typing import Dict, List, Optional, Tuple
 import torch
 from torch import Tensor, nn
 
-sys.path.append(str(Path(__file__).parent.parent))  # for absolute imports
+sys.path.insert(0, str(Path(__file__).parent.parent))  # prefer local repo imports
 
+from src.game import build_game
 from src.game.quadrotor_game import Hexner3DQuadrotorGame
 from src.optimization.objective_primal_sqp import primal_objective_sqp
 from src.rollout.trajectory import RolloutResult
@@ -52,7 +53,9 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument("--num-rollouts-per-type", type=int, default=1)
     p.add_argument("--rollout-steps", type=int, default=0,
-                   help="Number of MPC environment steps (<=0 uses config K).")
+                   help="Number of executed MPC environment steps (<=0 uses config K).")
+    p.add_argument("--local-horizon", type=int, default=0,
+                   help="Local replan horizon for each MPC solve (<=0 uses remaining horizon).")
     p.add_argument("--sample-actions", action="store_true")
     p.add_argument("--visualize", action="store_true")
     p.add_argument("--animate", action="store_true")
@@ -86,6 +89,7 @@ def _rebuild_game_config(meta: Dict[str, object]) -> GameConfig:
         I=int(meta.get("I", 2)),
         T=float(meta.get("T", 2.0)),
         K=int(meta.get("K", 5)),
+        dynamics_model=str(meta.get("dynamics_model", "rigid_body")),
         integrator=str(meta.get("integrator", "euler")),
         control_cost_mode=str(meta.get("control_cost_mode", "hover_relative")),
         line_search_accept_worse=bool(meta.get("line_search_accept_worse", False)),
@@ -96,6 +100,12 @@ def _rebuild_game_config(meta: Dict[str, object]) -> GameConfig:
         K1_scale=float(meta.get("K1_scale", 1.0)),
         K2_scale=float(meta.get("K2_scale", 1.0)),
         theta_values=tuple(meta.get("theta_values", (-1.0, 1.0))),       # type: ignore[arg-type]
+        interception_state_weights=tuple(
+            meta.get(
+                "interception_state_weights",
+                (1.0, 1.0, 1.0, 0.25, 0.25, 0.25, 0.1, 0.1, 0.1),
+            )
+        ),  # type: ignore[arg-type]
     )
 
 
@@ -159,22 +169,10 @@ def build_action_space(
     if args.no_action_clamp:
         return None
 
-    dtype, device = game.dtype, game.device
-
-    u_lo = torch.full((game.du,), -args.u_max, dtype=dtype, device=device)
-    u_hi = torch.full((game.du,), args.u_max, dtype=dtype, device=device)
-    v_lo = torch.full((game.dv,), -args.v_max, dtype=dtype, device=device)
-    v_hi = torch.full((game.dv,), args.v_max, dtype=dtype, device=device)
-
-    if game.control_cost_mode == "hover_relative":
-        u_bias, v_bias = game.control_bias()
-        u_lo[0] = -float(u_bias[0].item())
-        u_hi[0] = args.u_max - float(u_bias[0].item())
-        v_lo[0] = -float(v_bias[0].item())
-        v_hi[0] = args.v_max - float(v_bias[0].item())
-    else:
-        u_lo[0] = 0.0
-        v_lo[0] = 0.0
+    u_lo, u_hi, v_lo, v_hi = game.action_box_bounds(
+        u_max=float(args.u_max),
+        v_max=float(args.v_max),
+    )
 
     return BoxActionSpace(u_min=u_lo, u_max=u_hi, v_min=v_lo, v_max=v_hi)
 
@@ -196,6 +194,7 @@ def _extract_alpha_subtree(
     full_indexer: FullIaryTreeIndexer,
     start_depth: int,
     start_node: int,
+    horizon: int = 0,
 ) -> Tuple[Tensor, FullIaryTreeIndexer]:
     """Extract alpha tensor for the subtree rooted at (start_depth, start_node)."""
     if not (0 <= start_depth < full_indexer.K):
@@ -204,7 +203,8 @@ def _extract_alpha_subtree(
         )
 
     I = full_indexer.I
-    K_rem = full_indexer.K - start_depth
+    remaining = full_indexer.K - start_depth
+    K_rem = remaining if horizon <= 0 else min(horizon, remaining)
     local_indexer = FullIaryTreeIndexer(I=I, K=K_rem)
     max_nodes = local_indexer.max_nodes_per_depth
     alpha_sub = torch.empty(
@@ -284,6 +284,7 @@ def mpc_rollout_for_type(
     p0: Tensor,
     type_index: int,
     rollout_steps: int,
+    local_horizon: int,
     action_space: Optional[BoxActionSpace],
     args: argparse.Namespace,
     sample_actions: bool,
@@ -315,6 +316,7 @@ def mpc_rollout_for_type(
             full_indexer=full_indexer,
             start_depth=t,
             start_node=node_idx,
+            horizon=local_horizon,
         )
         local_loss, details = _solve_local_tree(
             game=game,
@@ -341,14 +343,11 @@ def mpc_rollout_for_type(
         # Use first-step feedback policy from the local SQP solution.
         Ku = sqp_res.riccati_sol.K_u[0][0, action]
         Kv = sqp_res.riccati_sol.K_v[0][0, action]
-        lam_edge = sqp_res.belief_tree.lambda_edge[0][0]
-        kappa_u_all = sqp_res.riccati_sol.kappa_u[0][0]
-        kappa_v_all = sqp_res.riccati_sol.kappa_v[0][0]
-        kappa_u_agg = torch.einsum("a,ad->d", lam_edge, kappa_u_all)
-        kappa_v_agg = torch.einsum("a,ad->d", lam_edge, kappa_v_all)
+        kappa_u = sqp_res.riccati_sol.kappa_u[0][0, action]
+        kappa_v = sqp_res.riccati_sol.kappa_v[0][0, action]
 
-        u = Ku @ x + kappa_u_agg
-        v = Kv @ x + kappa_v_agg
+        u = Ku @ x + kappa_u
+        v = Kv @ x + kappa_v
         if action_space is not None:
             u = action_space.clip_u(u)
             v = action_space.clip_v(v)
@@ -423,6 +422,7 @@ def main() -> None:
             I=cfg.I,
             T=cfg.T,
             K=cfg.K,
+            dynamics_model=cfg.dynamics_model,
             integrator=cfg.integrator,
             control_cost_mode=cfg.control_cost_mode,
             line_search_accept_worse=cfg.line_search_accept_worse,
@@ -433,9 +433,10 @@ def main() -> None:
             K1_scale=cfg.K1_scale,
             K2_scale=cfg.K2_scale,
             theta_values=cfg.theta_values,
+            interception_state_weights=cfg.interception_state_weights,
         )
 
-    game = Hexner3DQuadrotorGame(cfg)
+    game = build_game(cfg)
     indexer = FullIaryTreeIndexer(I=cfg.I, K=cfg.K)
 
     alpha_module = AlphaParam(
@@ -458,11 +459,12 @@ def main() -> None:
     p0 = p0 / p0.sum()
 
     rollout_steps = cfg.K if args.rollout_steps <= 0 else min(args.rollout_steps, cfg.K)
+    local_horizon = cfg.K if args.local_horizon <= 0 else min(args.local_horizon, cfg.K)
 
     print(f"[eval_mpc] Loaded checkpoint: {args.checkpoint}")
     print(
-        f"[eval_mpc] MPC horizon policy: receding finite horizon, "
-        f"rollout_steps={rollout_steps}, sqp_iters={args.sqp_iters}"
+        f"[eval_mpc] Evaluation mode: offline-trained alpha + online MPC, "
+        f"rollout_steps={rollout_steps}, local_horizon={local_horizon}, sqp_iters={args.sqp_iters}"
     )
 
     output_dir = Path(args.output_dir)
@@ -483,6 +485,7 @@ def main() -> None:
                 p0=p0,
                 type_index=type_idx,
                 rollout_steps=rollout_steps,
+                local_horizon=local_horizon,
                 action_space=action_space,
                 args=args,
                 sample_actions=args.sample_actions,
@@ -504,8 +507,8 @@ def main() -> None:
 
     for i, ro in enumerate(rollouts):
         type_idx = i // args.num_rollouts_per_type
-        p1_final = ro.x_traj[-1, :3]
-        p2_final = ro.x_traj[-1, 12:15]
+        p1_final = game.player_position(ro.x_traj[-1], 0)
+        p2_final = game.player_position(ro.x_traj[-1], 1)
         dists_p1 = torch.norm(targets - p1_final.unsqueeze(0), dim=-1)
         true_d = float(dists_p1[type_idx].item())
         other_d = float(
@@ -521,8 +524,10 @@ def main() -> None:
             and torch.isfinite(ro.belief_traj).all()
         )
         all_finite = all_finite and finite
-        min_alt_p1 = min(min_alt_p1, float(ro.x_traj[:, 2].min().item()))
-        min_alt_p2 = min(min_alt_p2, float(ro.x_traj[:, 14].min().item()))
+        p1_hist = game.player_position(ro.x_traj, 0)
+        p2_hist = game.player_position(ro.x_traj, 1)
+        min_alt_p1 = min(min_alt_p1, float(p1_hist[:, 2].min().item()))
+        min_alt_p2 = min(min_alt_p2, float(p2_hist[:, 2].min().item()))
 
         u_effort = float(torch.sum(ro.u_traj ** 2).item())
         v_effort = float(torch.sum(ro.v_traj ** 2).item())
@@ -589,9 +594,11 @@ def main() -> None:
     )
 
     summary = {
+        "evaluation_mode": "offline_trained_alpha_with_online_mpc",
         "checkpoint": args.checkpoint,
         "solve_mode": "mpc_receding_horizon",
         "rollout_steps": rollout_steps,
+        "local_horizon": local_horizon,
         "sqp_settings": {
             "sqp_iters": args.sqp_iters,
             "sqp_step_size": args.sqp_step_size,

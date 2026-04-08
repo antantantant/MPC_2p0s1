@@ -174,13 +174,6 @@ def _tree_forward_rollout(
         x_k = x_nodes[k]
         Nk = x_k.shape[0]
 
-        # Aggregate feedforward using prior edge probs
-        lam = belief_tree.lambda_edge[k]
-        kappa_u_all = riccati_sol.kappa_u[k]
-        kappa_v_all = riccati_sol.kappa_v[k]
-        kappa_u_agg = torch.einsum("na, nad -> nd", lam, kappa_u_all)
-        kappa_v_agg = torch.einsum("na, nae -> ne", lam, kappa_v_all)
-
         # Action-specific feedback
         Ku = riccati_sol.K_u[k]
         Kv = riccati_sol.K_v[k]
@@ -188,8 +181,8 @@ def _tree_forward_rollout(
         u_lin = torch.einsum("naud, nd -> nau", Ku, x_k)
         v_lin = torch.einsum("naed, nd -> nae", Kv, x_k)
 
-        u_opt = u_lin + kappa_u_agg.unsqueeze(1)
-        v_opt = v_lin + kappa_v_agg.unsqueeze(1)
+        u_opt = u_lin + riccati_sol.kappa_u[k]
+        v_opt = v_lin + riccati_sol.kappa_v[k]
 
         if action_space is not None:
             u_opt = action_space.clip_u(u_opt)

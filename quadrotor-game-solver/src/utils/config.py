@@ -61,6 +61,7 @@ class GameConfig:
 
     # ── Physics ──────────────────────────────────────────────────────
     quad_params: QuadrotorParams = field(default_factory=QuadrotorParams)
+    dynamics_model: str = "rigid_body"  # "rigid_body" or "interception"
 
     # ── Integrator ───────────────────────────────────────────────────
     integrator: str = "euler"           # "euler" or "rk4"
@@ -99,6 +100,11 @@ class GameConfig:
     K2_scale: float = 1.0
     theta_values: Tuple[float, ...] = (-1.0, 1.0)
     target_z: Optional[Tuple[float, ...]] = None
+    interception_state_weights: Tuple[float, ...] = (
+        1.0, 1.0, 1.0,
+        0.25, 0.25, 0.25,
+        0.10, 0.10, 0.10,
+    )
     #   If None → default z concentrates on z-position:
     #   z = (0,0,1,  0,0,0,  0,0,0,  0,0,0)  so targets are at ±1 on the z-axis.
 
@@ -126,6 +132,11 @@ class GameConfig:
             raise ValueError(
                 "control_cost_mode must be one of {'hover_relative', 'absolute'}, "
                 f"got {self.control_cost_mode!r}"
+            )
+        if self.dynamics_model not in {"rigid_body", "interception"}:
+            raise ValueError(
+                "dynamics_model must be one of {'rigid_body', 'interception'}, "
+                f"got {self.dynamics_model!r}"
             )
 
 

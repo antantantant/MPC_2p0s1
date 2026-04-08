@@ -15,8 +15,9 @@ from typing import Dict, List, Optional, Tuple
 import torch
 from torch import Tensor
 
-sys.path.append(str(Path(__file__).parent.parent))  # for absolute imports
+sys.path.insert(0, str(Path(__file__).parent.parent))  # prefer local repo imports
 
+from src.game import build_game
 from src.game.quadrotor_game import Hexner3DQuadrotorGame
 from src.optimization.objective_primal_sqp import primal_objective_sqp
 from src.rollout.trajectory import RolloutResult, rollout_trajectory
@@ -88,6 +89,7 @@ def _rebuild_game_config(meta: Dict[str, object]) -> GameConfig:
         I=int(meta.get("I", 2)),
         T=float(meta.get("T", 2.0)),
         K=int(meta.get("K", 5)),
+        dynamics_model=str(meta.get("dynamics_model", "rigid_body")),
         integrator=str(meta.get("integrator", "euler")),
         control_cost_mode=str(meta.get("control_cost_mode", "hover_relative")),
         line_search_accept_worse=bool(meta.get("line_search_accept_worse", False)),
@@ -98,6 +100,12 @@ def _rebuild_game_config(meta: Dict[str, object]) -> GameConfig:
         K1_scale=float(meta.get("K1_scale", 1.0)),
         K2_scale=float(meta.get("K2_scale", 1.0)),
         theta_values=tuple(meta.get("theta_values", (-1.0, 1.0))),       # type: ignore[arg-type]
+        interception_state_weights=tuple(
+            meta.get(
+                "interception_state_weights",
+                (1.0, 1.0, 1.0, 0.25, 0.25, 0.25, 0.1, 0.1, 0.1),
+            )
+        ),  # type: ignore[arg-type]
     )
 
 
@@ -163,22 +171,10 @@ def build_action_space(
     if args.no_action_clamp:
         return None
 
-    dtype, device = game.dtype, game.device
-
-    u_lo = torch.full((game.du,), -args.u_max, dtype=dtype, device=device)
-    u_hi = torch.full((game.du,), args.u_max, dtype=dtype, device=device)
-    v_lo = torch.full((game.dv,), -args.v_max, dtype=dtype, device=device)
-    v_hi = torch.full((game.dv,), args.v_max, dtype=dtype, device=device)
-
-    if game.control_cost_mode == "hover_relative":
-        u_bias, v_bias = game.control_bias()
-        u_lo[0] = -float(u_bias[0].item())
-        u_hi[0] = args.u_max - float(u_bias[0].item())
-        v_lo[0] = -float(v_bias[0].item())
-        v_hi[0] = args.v_max - float(v_bias[0].item())
-    else:
-        u_lo[0] = 0.0
-        v_lo[0] = 0.0
+    u_lo, u_hi, v_lo, v_hi = game.action_box_bounds(
+        u_max=float(args.u_max),
+        v_max=float(args.v_max),
+    )
 
     return BoxActionSpace(u_min=u_lo, u_max=u_hi, v_min=v_lo, v_max=v_hi)
 
@@ -229,6 +225,7 @@ def main() -> None:
             I=cfg.I,
             T=cfg.T,
             K=cfg.K,
+            dynamics_model=cfg.dynamics_model,
             integrator=cfg.integrator,
             control_cost_mode=cfg.control_cost_mode,
             line_search_accept_worse=cfg.line_search_accept_worse,
@@ -239,9 +236,10 @@ def main() -> None:
             K1_scale=cfg.K1_scale,
             K2_scale=cfg.K2_scale,
             theta_values=cfg.theta_values,
+            interception_state_weights=cfg.interception_state_weights,
         )
 
-    game = Hexner3DQuadrotorGame(cfg)
+    game = build_game(cfg)
     indexer = FullIaryTreeIndexer(I=cfg.I, K=cfg.K)
 
     alpha_module = AlphaParam(
@@ -354,8 +352,8 @@ def main() -> None:
     print(f"{'─'*60}")
     for i, ro in enumerate(rollouts):
         type_idx = i // args.num_rollouts_per_type
-        p1_final = ro.x_traj[-1, :3].tolist()
-        p2_final = ro.x_traj[-1, 12:15].tolist()
+        p1_final = game.player_position(ro.x_traj[-1], 0).tolist()
+        p2_final = game.player_position(ro.x_traj[-1], 1).tolist()
         u_effort = float(torch.sum(ro.u_traj ** 2).item())
         v_effort = float(torch.sum(ro.v_traj ** 2).item())
         rows.append(

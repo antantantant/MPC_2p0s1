@@ -67,7 +67,6 @@ def test_training_logs_pre_post_losses_and_saves_checkpoints(tmp_path: Path) -> 
         log_every=1,
         save_every=1,
         eval_cold_start_every=1,
-        save_best_by="cold_start_loss",
         gate_min_separation=0.0,
         gate_min_terminal_consistency=0.0,
         altitude_floor=-10.0,

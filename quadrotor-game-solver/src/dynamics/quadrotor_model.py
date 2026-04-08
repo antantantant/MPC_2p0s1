@@ -258,8 +258,14 @@ def linearize_dynamics(
     B1 = vmap(jacfwd(_f, argnums=1))(x, u, v)   # (B, 24, 4)
     B2 = vmap(jacfwd(_f, argnums=2))(x, u, v)   # (B, 24, 4)
 
+    # torch.func may return Jacobians in a promoted dtype; keep everything in
+    # the same dtype/device as the primal tensors so float32 runs remain valid.
+    A = A.to(dtype=x.dtype, device=x.device)
+    B1 = B1.to(dtype=x.dtype, device=x.device)
+    B2 = B2.to(dtype=x.dtype, device=x.device)
+
     # Affine residual  d = f(x,u,v) − A x − B1 u − B2 v
-    x_next = step_fn(x, u, v, dt, params, small_angle=small_angle)
+    x_next = step_fn(x, u, v, dt, params, small_angle=small_angle).to(dtype=x.dtype, device=x.device)
     Ax  = torch.bmm(A,  x.unsqueeze(-1)).squeeze(-1)
     B1u = torch.bmm(B1, u.unsqueeze(-1)).squeeze(-1)
     B2v = torch.bmm(B2, v.unsqueeze(-1)).squeeze(-1)

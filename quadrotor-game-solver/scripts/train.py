@@ -21,11 +21,13 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import torch
+from tqdm.auto import tqdm
 
-sys.path.append(str(Path(__file__).parent.parent))  # for absolute imports
+sys.path.insert(0, str(Path(__file__).parent.parent))  # prefer local repo imports
 
 # ── project imports (absolute, works because pyproject.toml sets pythonpath=["."])
 from src.utils.config import GameConfig
+from src.game import build_game
 from src.game.quadrotor_game import Hexner3DQuadrotorGame
 from src.tree.indexing import FullIaryTreeIndexer
 from src.tree.signaling import AlphaParam, AlphaParamConfig
@@ -58,6 +60,13 @@ def parse_args() -> argparse.Namespace:
                    help="Time horizon T (s).")
     p.add_argument("--K", type=int, default=10,
                    help="Number of discrete steps (depth K).")
+    p.add_argument(
+        "--game-model",
+        type=str,
+        default="rigid_body",
+        choices=["rigid_body", "interception"],
+        help="Dynamics/game model: full rigid-body quadrotor or jerk-integrator interception model.",
+    )
     p.add_argument("--integrator", type=str, default="rk4",
                    choices=["euler", "rk4"],
                    help="Integration scheme. rk4 recommended for tau >= 0.1.")
@@ -78,14 +87,20 @@ def parse_args() -> argparse.Namespace:
     # ── Cost scales ─────────────────────────────────────────────────
     p.add_argument("--theta-values", type=str, default="-1.0,1.0",
                    help="Comma-separated payoff type scalars θ_i.")
-    p.add_argument("--R1-diag", type=str, default="0.05,0.025,0.025,0.01",
-                   help="Comma-separated running-cost diag for P1.")
-    p.add_argument("--R2-diag", type=str, default="0.05,0.10,0.10,0.02",
-                   help="Comma-separated running-cost diag for P2.")
+    p.add_argument("--R1-diag", type=str, default=None,
+                   help="Comma-separated running-cost diag for P1. Defaults are model-specific.")
+    p.add_argument("--R2-diag", type=str, default=None,
+                   help="Comma-separated running-cost diag for P2. Defaults are model-specific.")
     p.add_argument("--K1-scale", type=float, default=10.0,
                    help="Scale for P1 terminal-cost matrix.")
     p.add_argument("--K2-scale", type=float, default=10.0,
                    help="Scale for P2 terminal-cost matrix.")
+    p.add_argument(
+        "--interception-state-weights",
+        type=str,
+        default="1.0,1.0,1.0,0.25,0.25,0.25,0.1,0.1,0.1",
+        help="State weights [p,v,a] for the interception game terminal cost.",
+    )
 
     # ── SQP ─────────────────────────────────────────────────────────
     # Conservative defaults for nonlinear convergence (tested: converges in ~129 iters)
@@ -127,16 +142,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--log-every", type=int, default=1)
     p.add_argument("--save-every", type=int, default=10)
     p.add_argument("--eval-cold-start-every", type=int, default=1)
-    p.add_argument(
-        "--save-best-by",
-        type=str,
-        default="cold_start_loss",
-        choices=["saddle_rank", "cold_start_loss", "pre_step_loss"],
-        help=(
-            "Deprecated and ignored. Checkpoint selection is now always 'last "
-            "checkpoint' (final model state). Kept for backward compatibility."
-        ),
-    )
     p.add_argument("--gate-min-separation", type=float, default=0.05)
     p.add_argument("--gate-min-terminal-consistency", type=float, default=0.5)
     p.add_argument("--altitude-floor", type=float, default=-5.0)
@@ -154,13 +159,24 @@ def build_game_config(args: argparse.Namespace) -> GameConfig:
 
     dtype = torch.float64 if args.dtype == "float64" else torch.float32
     theta_vals = tuple(float(v) for v in args.theta_values.split(","))
-    r1 = tuple(float(v) for v in args.R1_diag.split(","))
-    r2 = tuple(float(v) for v in args.R2_diag.split(","))
+    if args.game_model == "interception":
+        r1_default = (1.0, 1.0, 1.0)
+        r2_default = (1.0, 1.0, 1.0)
+    else:
+        r1_default = (0.05, 0.025, 0.025, 0.01)
+        r2_default = (0.05, 0.10, 0.10, 0.02)
+
+    r1 = tuple(float(v) for v in (args.R1_diag.split(",") if args.R1_diag else r1_default))
+    r2 = tuple(float(v) for v in (args.R2_diag.split(",") if args.R2_diag else r2_default))
+    interception_state_weights = tuple(
+        float(v) for v in args.interception_state_weights.split(",")
+    )
 
     return GameConfig(
         I=args.I,
         T=args.T,
         K=args.K,
+        dynamics_model=args.game_model,
         integrator=args.integrator,
         linearized_mode=args.linearized,
         control_cost_mode=args.control_cost_mode,
@@ -172,6 +188,7 @@ def build_game_config(args: argparse.Namespace) -> GameConfig:
         K1_scale=args.K1_scale,
         K2_scale=args.K2_scale,
         theta_values=theta_vals,
+        interception_state_weights=interception_state_weights,
     )
 
 
@@ -183,25 +200,10 @@ def build_action_space(
     if args.no_action_clamp:
         return None
 
-    dtype, device = game.dtype, game.device
-
-    u_lo = torch.full((game.du,), -args.u_max, dtype=dtype, device=device)
-    u_hi = torch.full((game.du,),  args.u_max, dtype=dtype, device=device)
-
-    v_lo = torch.full((game.dv,), -args.v_max, dtype=dtype, device=device)
-    v_hi = torch.full((game.dv,),  args.v_max, dtype=dtype, device=device)
-
-    if game.control_cost_mode == "hover_relative":
-        # Optimization controls are deltas around hover thrust.
-        u_bias, v_bias = game.control_bias()
-        u_lo[0] = -float(u_bias[0].item())
-        u_hi[0] = args.u_max - float(u_bias[0].item())
-        v_lo[0] = -float(v_bias[0].item())
-        v_hi[0] = args.v_max - float(v_bias[0].item())
-    else:
-        # Absolute physical controls.
-        u_lo[0] = 0.0
-        v_lo[0] = 0.0
+    u_lo, u_hi, v_lo, v_hi = game.action_box_bounds(
+        u_max=float(args.u_max),
+        v_max=float(args.v_max),
+    )
 
     return BoxActionSpace(u_min=u_lo, u_max=u_hi, v_min=v_lo, v_max=v_hi)
 
@@ -284,6 +286,7 @@ def run_training(
     v_prev = None
     latest_metrics: Dict[str, object] = {}
     final_loss_val = float("nan")
+    progress = tqdm(total=args.epochs, desc="train", dynamic_ncols=True)
 
     for epoch in range(args.epochs):
         t0 = time.time()
@@ -332,6 +335,12 @@ def run_training(
 
         optimizer.step()
         dt_epoch = time.time() - t0
+        progress.update(1)
+        progress.set_postfix(
+            loss=f"{pre_step_loss:+.4f}",
+            grad=f"{grad_norm:.2e}",
+            dt=f"{dt_epoch:.2f}s",
+        )
 
         # ── Store solution for warm-start in next epoch ──────────────
         # Detach to avoid keeping gradient graph across epochs
@@ -433,7 +442,7 @@ def run_training(
             if post_step_cold_start_loss is not None:
                 gate_str = f" post={post_step_cold_start_loss:+.6f} gates={passed_gates}"
 
-            print(
+            progress.write(
                 f"[{epoch:4d}/{args.epochs}]  pre={pre_step_loss:+.6f}{gate_str}  "
                 f"|∇|={grad_norm:.3e}  α∈{alpha_range}  "
                 f"time_per_epoch={dt_epoch:.2f}s{conv_str}{nan_str}"
@@ -620,7 +629,7 @@ def main() -> None:
 
     # ── Build objects ────────────────────────────────────────────────
     cfg = build_game_config(args)
-    game = Hexner3DQuadrotorGame(cfg)
+    game = build_game(cfg)
     indexer = FullIaryTreeIndexer(I=cfg.I, K=cfg.K)
     action_space = build_action_space(args, game)
 
@@ -636,7 +645,8 @@ def main() -> None:
 
     # ── Run directory ────────────────────────────────────────────────
     if args.run_dir is None:
-        run_dir = Path("runs") / f"quad_sqp_K{cfg.K}_I{cfg.I}"
+        run_stub = "interception_game" if cfg.dynamics_model == "interception" else "quadrotor_game"
+        run_dir = Path("runs") / run_stub
     else:
         run_dir = Path(args.run_dir)
 
@@ -650,6 +660,7 @@ def main() -> None:
     # ── Print summary ────────────────────────────────────────────────
     print(f"[train] Game: {cfg.game_name}")
     print(f"  T={cfg.T:.2f}  K={cfg.K}  I={cfg.I}  tau={cfg.tau:.4f}")
+    print(f"  dynamics_model={cfg.dynamics_model}")
     print(f"  dx_joint={game.dx}  du={game.du}  dv={game.dv}")
     print(
         f"  integrator={cfg.integrator}  dtype={cfg.dtype}  "
@@ -658,7 +669,7 @@ def main() -> None:
     print(f"  tree nodes at depth K: {indexer.node_count(indexer.K)}")
     print(f"  α logits shape: {tuple(alpha_module.logits.shape)}")
     print(f"  x0 (P1 pos): {x0[:3].tolist()}")
-    print(f"  x0 (P2 pos): {x0[12:15].tolist()}")
+    print(f"  x0 (P2 pos): {game.player_position(x0, 1).tolist()}")
     print(f"  p0: {p0.tolist()}")
     print(f"  targets: {game.type_target_positions().tolist()}")
     if action_space is not None:
@@ -669,6 +680,7 @@ def main() -> None:
     # Save config snapshot as JSON
     config_dict = {
         "T": cfg.T, "K": cfg.K, "I": cfg.I,
+        "dynamics_model": cfg.dynamics_model,
         "integrator": cfg.integrator,
         "control_cost_mode": cfg.control_cost_mode,
         "line_search_accept_worse": cfg.line_search_accept_worse,
@@ -676,6 +688,7 @@ def main() -> None:
         "R1_diag": list(cfg.R1_diag),
         "R2_diag": list(cfg.R2_diag),
         "K1_scale": cfg.K1_scale, "K2_scale": cfg.K2_scale,
+        "interception_state_weights": list(cfg.interception_state_weights),
         "theta_values": list(cfg.theta_values),
         "lr": args.lr, "epochs": args.epochs,
         "sqp_iters": args.sqp_iters,
@@ -690,7 +703,6 @@ def main() -> None:
         "u_max": args.u_max, "v_max": args.v_max,
         "eval_cold_start_every": args.eval_cold_start_every,
         "checkpoint_selection_policy": "last_checkpoint",
-        "save_best_by_deprecated": args.save_best_by,
         "gate_min_separation": args.gate_min_separation,
         "gate_min_terminal_consistency": args.gate_min_terminal_consistency,
         "altitude_floor": args.altitude_floor,

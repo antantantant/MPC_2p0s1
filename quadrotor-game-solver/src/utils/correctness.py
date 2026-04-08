@@ -111,8 +111,8 @@ def rollout_correctness_metrics(
         )
         all_finite = all_finite and finite
 
-        p1_final = ro.x_traj[-1, :3]
-        p2_final = ro.x_traj[-1, 12:15]
+        p1_final = game.player_position(ro.x_traj[-1], 0)
+        p2_final = game.player_position(ro.x_traj[-1], 1)
 
         dists_p1 = torch.norm(targets - p1_final.unsqueeze(0), dim=-1)
         true_d = float(dists_p1[type_idx].item())

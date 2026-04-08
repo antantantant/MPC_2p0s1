@@ -96,15 +96,11 @@ def rollout_trajectory(
         K_u_edge = riccati_sol.K_u[k][node_idx, a_int]
         K_v_edge = riccati_sol.K_v[k][node_idx, a_int]
 
-        # Aggregate feedforward
-        lam_edge = belief_tree.lambda_edge[k][node_idx]
-        kappa_u_all = riccati_sol.kappa_u[k][node_idx]
-        kappa_v_all = riccati_sol.kappa_v[k][node_idx]
-        kappa_u_agg = torch.einsum("a, ad -> d", lam_edge, kappa_u_all)
-        kappa_v_agg = torch.einsum("a, ad -> d", lam_edge, kappa_v_all)
+        kappa_u_edge = riccati_sol.kappa_u[k][node_idx, a_int]
+        kappa_v_edge = riccati_sol.kappa_v[k][node_idx, a_int]
 
-        u = K_u_edge @ x + kappa_u_agg
-        v = K_v_edge @ x + kappa_v_agg
+        u = K_u_edge @ x + kappa_u_edge
+        v = K_v_edge @ x + kappa_v_edge
 
         if action_space is not None:
             u = action_space.clip_u(u)

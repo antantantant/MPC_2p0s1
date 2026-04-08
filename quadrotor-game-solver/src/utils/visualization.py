@@ -167,8 +167,10 @@ def plot_trajectories(
         ax = fig.add_subplot(gs[0], projection="3d")
         ax_bel = fig.add_subplot(gs[1])
 
+    dx_total = x_np.shape[1]
+    dx_single = dx_total // 2
     p1 = x_np[:, :3]
-    p2 = x_np[:, 12:15]
+    p2 = x_np[:, dx_single : dx_single + 3]
 
     ax.plot(p1[:, 0], p1[:, 1], p1[:, 2], "-o", color=cfg.colors_p1, label="P1", markersize=3)
     ax.plot(p2[:, 0], p2[:, 1], p2[:, 2], "-s", color=cfg.colors_p2, label="P2", markersize=3)
@@ -247,10 +249,14 @@ def animate_rollout(
         if belief_np.ndim != 2 or belief_np.shape[0] != t_steps:
             raise ValueError("belief_traj must have shape (K+1, I) and match x_traj length")
 
+    dx_total = x_np.shape[1]
+    dx_single = dx_total // 2
     p1 = x_np[:, :3]
-    p2 = x_np[:, 12:15]
-    euler_p1 = x_np[:, 6:9]
-    euler_p2 = x_np[:, 18:21]
+    p2 = x_np[:, dx_single : dx_single + 3]
+    has_attitude = dx_single >= 12
+    if has_attitude:
+        euler_p1 = x_np[:, 6:9]
+        euler_p2 = x_np[:, dx_single + 6 : dx_single + 9]
 
     if belief_np is None:
         fig = plt.figure(figsize=cfg.figsize)
@@ -294,8 +300,8 @@ def animate_rollout(
     drone2 = ax.scatter([], [], [], s=cfg.drone_size, color=cfg.colors_p2, depthshade=False, label="P2")
 
     arm = cfg.arm_len_plot
-    arm1_lines = [ax.plot([], [], [], color=cfg.colors_p1, lw=2)[0] for _ in range(2)]
-    arm2_lines = [ax.plot([], [], [], color=cfg.colors_p2, lw=2)[0] for _ in range(2)]
+    arm1_lines = [ax.plot([], [], [], color=cfg.colors_p1, lw=2)[0] for _ in range(2)] if has_attitude else []
+    arm2_lines = [ax.plot([], [], [], color=cfg.colors_p2, lw=2)[0] for _ in range(2)] if has_attitude else []
 
     time_text = ax.text2D(0.02, 0.95, "", transform=ax.transAxes)
     belief_text = ax.text2D(0.02, 0.90, "", transform=ax.transAxes)
@@ -332,8 +338,9 @@ def animate_rollout(
         drone1._offsets3d = (np.array([p1[frame, 0]]), np.array([p1[frame, 1]]), np.array([p1[frame, 2]]))
         drone2._offsets3d = (np.array([p2[frame, 0]]), np.array([p2[frame, 1]]), np.array([p2[frame, 2]]))
 
-        _draw_arms(arm1_lines, p1[frame], *euler_p1[frame], arm)
-        _draw_arms(arm2_lines, p2[frame], *euler_p2[frame], arm)
+        if has_attitude:
+            _draw_arms(arm1_lines, p1[frame], *euler_p1[frame], arm)
+            _draw_arms(arm2_lines, p2[frame], *euler_p2[frame], arm)
 
         time_text.set_text(f"t = {frame * dt:.2f} s")
         if belief_np is not None:

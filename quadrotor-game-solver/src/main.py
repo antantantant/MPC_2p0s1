@@ -20,7 +20,7 @@ from pathlib import Path
 import torch
 
 from .utils.config import GameConfig, make_hexner3d_game_config
-from .game.quadrotor_game import Hexner3DQuadrotorGame
+from .game import build_game
 from .tree.indexing import FullIaryTreeIndexer
 from .tree.signaling import AlphaParam, AlphaParamConfig
 from .solvers.action_spaces import BoxActionSpace
@@ -36,6 +36,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--T", type=float, default=2.0, help="Time horizon (s)")
     p.add_argument("--K", type=int, default=5, help="Number of discrete steps")
     p.add_argument("--I", type=int, default=2, help="Number of types")
+    p.add_argument(
+        "--game-model",
+        type=str,
+        default="rigid_body",
+        choices=["rigid_body", "interception"],
+    )
     p.add_argument("--integrator", type=str, default="euler",
                    choices=["euler", "rk4"])
     p.add_argument("--dtype", type=str, default="float64",
@@ -83,11 +89,12 @@ def main() -> None:
         T=args.T,
         K=args.K,
         I=args.I,
+        dynamics_model=args.game_model,
         integrator=args.integrator,
         dtype=dtype,
         device=device,
     )
-    game = Hexner3DQuadrotorGame(cfg)
+    game = build_game(cfg)
     indexer = FullIaryTreeIndexer(I=cfg.I, K=cfg.K)
 
     print(f"Game: {cfg.game_name}")
@@ -108,13 +115,10 @@ def main() -> None:
     # ── Action space ─────────────────────────────────────────────────
     action_space = None
     if not args.no_action_clamp:
-        u_lo = torch.full((game.du,), -args.u_max, dtype=dtype, device=device)
-        u_hi = torch.full((game.du,),  args.u_max, dtype=dtype, device=device)
-        # Thrust is non-negative
-        u_lo[0] = 0.0
-        v_lo = torch.full((game.dv,), -args.v_max, dtype=dtype, device=device)
-        v_hi = torch.full((game.dv,),  args.v_max, dtype=dtype, device=device)
-        v_lo[0] = 0.0
+        u_lo, u_hi, v_lo, v_hi = game.action_box_bounds(
+            u_max=float(args.u_max),
+            v_max=float(args.v_max),
+        )
         action_space = BoxActionSpace(u_min=u_lo, u_max=u_hi,
                                       v_min=v_lo, v_max=v_hi)
         print(f"  action bounds u: [{u_lo.tolist()}, {u_hi.tolist()}]")
@@ -124,7 +128,7 @@ def main() -> None:
     x0 = game.default_initial_state()
     p0 = game.default_prior()
     print(f"  x0 (P1 pos): {x0[:3].tolist()}")
-    print(f"  x0 (P2 pos): {x0[12:15].tolist()}")
+    print(f"  x0 (P2 pos): {game.player_position(x0, 1).tolist()}")
     print(f"  p0: {p0.tolist()}")
     print(f"  targets (z·θ_i positions): "
           f"{game.type_target_positions().tolist()}")

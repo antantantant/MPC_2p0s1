@@ -282,6 +282,37 @@ class Hexner3DQuadrotorGame:
     def default_prior(self) -> Tensor:
         return self._p0_default.clone()
 
+    def player_position(self, x: Tensor, player_index: int) -> Tensor:
+        """Extract a player's 3-D position from a joint state tensor."""
+        if player_index not in (0, 1):
+            raise ValueError("player_index must be 0 or 1")
+        offset = player_index * self.dx_single
+        return x[..., offset : offset + 3]
+
+    def action_box_bounds(
+        self,
+        *,
+        u_max: float,
+        v_max: float,
+    ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+        """Default control box bounds used by the scripts."""
+        u_lo = torch.full((self.du,), -u_max, dtype=self.dtype, device=self.device)
+        u_hi = torch.full((self.du,), u_max, dtype=self.dtype, device=self.device)
+        v_lo = torch.full((self.dv,), -v_max, dtype=self.dtype, device=self.device)
+        v_hi = torch.full((self.dv,), v_max, dtype=self.dtype, device=self.device)
+
+        if self.control_cost_mode == "hover_relative":
+            u_bias, v_bias = self.control_bias()
+            u_lo[0] = -float(u_bias[0].item())
+            u_hi[0] = u_max - float(u_bias[0].item())
+            v_lo[0] = -float(v_bias[0].item())
+            v_hi[0] = v_max - float(v_bias[0].item())
+        else:
+            u_lo[0] = 0.0
+            v_lo[0] = 0.0
+
+        return u_lo, u_hi, v_lo, v_hi
+
     # ─── Dynamics ────────────────────────────────────────────────────────
 
     def step(self, x: Tensor, u: Tensor, v: Tensor) -> Tensor:
