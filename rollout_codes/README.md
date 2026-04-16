@@ -149,6 +149,86 @@ Most useful functions:
 - `save_trajectory_png(...)`
 - `save_animation_html(...)`
 
+## Real-Time Loop Pattern
+
+For a real robot/controller stack, the usual pattern is:
+
+1. load the checkpoint and solve the offline root tree once
+2. keep track of:
+   - current measured state `x_current`
+   - current public belief `belief`
+   - realized prototype history `prototypes_so_far`
+3. call `query_policy_action(...)` every control cycle
+4. apply `u` and/or `v`
+5. update:
+   - `belief = step.next_belief`
+   - `prototypes_so_far.append(step.prototype_index)`
+
+Important:
+
+- this tree policy needs the realized prototype history, not just the current belief
+- `type_index` is the informed player type row used to read the correct alpha branch
+- the one-time expensive setup is `load_policy_runtime(...)`; the per-step call is `query_policy_action(...)`
+
+Example:
+
+```python
+from pathlib import Path
+import torch
+
+from hexner_mod_3d_rollout import load_policy_runtime, query_policy_action
+
+device = torch.device("cpu")
+
+x0 = torch.tensor(
+    [-1.0, 0.0, 1.0, 0.0, 0.0, 0.0,
+      1.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+    dtype=torch.float32,
+    device=device,
+)
+p0 = torch.tensor([0.5, 0.5], dtype=torch.float32, device=device)
+
+runtime = load_policy_runtime(
+    checkpoint_path=Path("checkpoints/latest.pt"),
+    device=device,
+    game_type="original",
+    x0=x0,
+    p0=p0,
+)
+
+belief = p0.clone()
+prototypes_so_far = []
+
+for k in range(runtime.setup.game_cfg.K):
+    x_current = get_current_state_from_robot()   # torch tensor, shape (12,)
+
+    step = query_policy_action(
+        runtime=runtime,
+        type_index=0,                  # example: choose the controller row for type 0
+        x_current=x_current,
+        belief_current=belief,
+        prototypes_so_far=prototypes_so_far,
+        sample_actions=True,           # or False for deterministic argmax
+        use_action_clip=False,
+    )
+
+    u = step.u
+    v = step.v
+
+    send_control_to_robot(u, v)
+
+    belief = step.next_belief
+    prototypes_so_far.append(step.prototype_index)
+
+    print(
+        f"step={k}, proto={step.prototype_index}, "
+        f"control_ms={step.control_compute_ms:.4f}, "
+        f"u={u.tolist()}, v={v.tolist()}"
+    )
+```
+
+The same call pattern applies to `hexner_mod_3d_rollout_diffmpc.py`; the only difference is that its optional online re-solve path can use the DiffMPC-style backend.
+
 ## Timing Fields
 
 The JSON output includes:
