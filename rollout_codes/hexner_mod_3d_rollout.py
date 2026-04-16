@@ -18,8 +18,10 @@ except ImportError:  # pragma: no cover - optional for visualization
 
 try:
     import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
 except ImportError:  # pragma: no cover - optional for visualization
     go = None
+    make_subplots = None
 
 if __package__ in (None, ""):
     _FILE = Path(__file__).resolve()
@@ -1171,59 +1173,230 @@ def save_animation_html(
     rollout: Dict[str, Any],
     output_path: Path,
     title: Optional[str] = None,
+    true_type: Optional[int] = None,
 ) -> None:
-    if go is None:
+    if go is None or make_subplots is None:
         raise ImportError("plotly is required to save an interactive animation HTML.")
 
     x_np = rollout["x_traj"].detach().cpu().numpy()
     dx1 = runtime.setup.game_cfg.dx1
     p1 = x_np[:, 0:3]
     p2 = x_np[:, dx1 : dx1 + 3]
+    belief_np = rollout["belief_traj"].detach().cpu().numpy()
+    num_types = belief_np.shape[1]
+    time_idx = np.arange(belief_np.shape[0], dtype=float)
+    targets = runtime.setup.game.type_targets().detach().cpu().numpy()[:, :3]
     points = np.concatenate([p1, p2], axis=0)
+    if targets.size > 0:
+        points = np.concatenate([points, targets], axis=0)
     mins = points.min(axis=0)
     maxs = points.max(axis=0)
     pad = np.maximum(0.15 * (maxs - mins), 0.2)
 
-    frames = []
-    for k in range(p1.shape[0]):
-        frames.append(
-            go.Frame(
-                name=str(k),
-                data=[
-                    go.Scatter3d(
-                        x=p1[: k + 1, 0],
-                        y=p1[: k + 1, 1],
-                        z=p1[: k + 1, 2],
-                        mode="lines+markers",
-                        line=dict(color="#1f77b4", width=6),
-                        marker=dict(size=4, color="#1f77b4"),
-                        name="P1",
-                    ),
-                    go.Scatter3d(
-                        x=p2[: k + 1, 0],
-                        y=p2[: k + 1, 1],
-                        z=p2[: k + 1, 2],
-                        mode="lines+markers",
-                        line=dict(color="#d62728", width=6),
-                        marker=dict(size=4, color="#d62728"),
-                        name="P2",
-                    ),
-                ],
-            )
+    type_colors = [
+        "#2ca02c",
+        "#ff7f0e",
+        "#9467bd",
+        "#8c564b",
+        "#e377c2",
+        "#7f7f7f",
+    ]
+
+    title_text = title or "Hexner 3D rollout animation"
+    if true_type is not None:
+        type_desc = f"type {int(true_type)}"
+        if hasattr(runtime.setup.game, "theta_vals"):
+            theta_vals = runtime.setup.game.theta_vals.detach().cpu().tolist()
+            if 0 <= int(true_type) < len(theta_vals):
+                type_desc = f"type {int(true_type)} (theta={theta_vals[int(true_type)]:.3f})"
+        title_text = f"{title_text} | True {type_desc}"
+
+    fig = make_subplots(
+        rows=1,
+        cols=2,
+        specs=[[{"type": "scene"}, {"type": "xy"}]],
+        column_widths=[0.66, 0.34],
+        subplot_titles=("3D Trajectories", "Belief Evolution"),
+    )
+
+    fig.add_trace(
+        go.Scatter3d(
+            x=p1[:1, 0],
+            y=p1[:1, 1],
+            z=p1[:1, 2],
+            mode="lines+markers",
+            line=dict(color="#1f77b4", width=6),
+            marker=dict(size=4, color="#1f77b4"),
+            name="P1",
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter3d(
+            x=p2[:1, 0],
+            y=p2[:1, 1],
+            z=p2[:1, 2],
+            mode="lines+markers",
+            line=dict(color="#d62728", width=6),
+            marker=dict(size=4, color="#d62728"),
+            name="P2",
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter3d(
+            x=[p1[0, 0]],
+            y=[p1[0, 1]],
+            z=[p1[0, 2]],
+            mode="markers+text",
+            marker=dict(size=7, color="#1f77b4", symbol="circle"),
+            text=["P1 start"],
+            textposition="top center",
+            name="P1 start",
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter3d(
+            x=[p2[0, 0]],
+            y=[p2[0, 1]],
+            z=[p2[0, 2]],
+            mode="markers+text",
+            marker=dict(size=7, color="#d62728", symbol="circle"),
+            text=["P2 start"],
+            textposition="top center",
+            name="P2 start",
+        ),
+        row=1,
+        col=1,
+    )
+
+    for i in range(targets.shape[0]):
+        color = type_colors[i % len(type_colors)]
+        marker_symbol = "diamond"
+        marker_size = 8
+        label = f"Target type {i}"
+        if true_type is not None and int(true_type) == i:
+            marker_symbol = "diamond-open"
+            marker_size = 11
+            label = f"Chosen target type {i}"
+        fig.add_trace(
+            go.Scatter3d(
+                x=[targets[i, 0]],
+                y=[targets[i, 1]],
+                z=[targets[i, 2]],
+                mode="markers+text",
+                marker=dict(size=marker_size, color=color, symbol=marker_symbol),
+                text=[label],
+                textposition="top center",
+                name=label,
+            ),
+            row=1,
+            col=1,
         )
 
-    fig = go.Figure(
-        data=frames[0].data if frames else [],
-        frames=frames,
+    belief_marker_trace_indices: list[int] = []
+    for i in range(num_types):
+        color = type_colors[i % len(type_colors)]
+        fig.add_trace(
+            go.Scatter(
+                x=time_idx,
+                y=belief_np[:, i],
+                mode="lines",
+                line=dict(color=color, width=2),
+                name=f"Belief type {i}",
+            ),
+            row=1,
+            col=2,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=[time_idx[0]],
+                y=[belief_np[0, i]],
+                mode="markers",
+                marker=dict(color=color, size=10),
+                name=f"Current belief type {i}",
+                showlegend=False,
+            ),
+            row=1,
+            col=2,
+        )
+        belief_marker_trace_indices.append(len(fig.data) - 1)
+
+    fig.add_trace(
+        go.Scatter(
+            x=[time_idx[0], time_idx[0]],
+            y=[0.0, 1.0],
+            mode="lines",
+            line=dict(color="#444444", width=1, dash="dot"),
+            name="Current step",
+        ),
+        row=1,
+        col=2,
     )
+    step_line_trace_index = len(fig.data) - 1
+
+    frames = []
+    for k in range(p1.shape[0]):
+        frame_data: list[Any] = [
+            go.Scatter3d(
+                x=p1[: k + 1, 0],
+                y=p1[: k + 1, 1],
+                z=p1[: k + 1, 2],
+                mode="lines+markers",
+                line=dict(color="#1f77b4", width=6),
+                marker=dict(size=4, color="#1f77b4"),
+                name="P1",
+            ),
+            go.Scatter3d(
+                x=p2[: k + 1, 0],
+                y=p2[: k + 1, 1],
+                z=p2[: k + 1, 2],
+                mode="lines+markers",
+                line=dict(color="#d62728", width=6),
+                marker=dict(size=4, color="#d62728"),
+                name="P2",
+            ),
+        ]
+        frame_traces = [0, 1]
+        for i in range(num_types):
+            color = type_colors[i % len(type_colors)]
+            frame_data.append(
+                go.Scatter(
+                    x=[time_idx[k]],
+                    y=[belief_np[k, i]],
+                    mode="markers",
+                    marker=dict(color=color, size=10),
+                    showlegend=False,
+                )
+            )
+            frame_traces.append(belief_marker_trace_indices[i])
+        frame_data.append(
+            go.Scatter(
+                x=[time_idx[k], time_idx[k]],
+                y=[0.0, 1.0],
+                mode="lines",
+                line=dict(color="#444444", width=1, dash="dot"),
+                showlegend=False,
+            )
+        )
+        frame_traces.append(step_line_trace_index)
+        frames.append(go.Frame(name=str(k), data=frame_data, traces=frame_traces))
+
+    fig.frames = frames
     fig.update_layout(
-        title=title or "Hexner 3D rollout animation",
+        title=title_text,
         scene=dict(
             xaxis=dict(title="x", range=[float(mins[0] - pad[0]), float(maxs[0] + pad[0])]),
             yaxis=dict(title="y", range=[float(mins[1] - pad[1]), float(maxs[1] + pad[1])]),
             zaxis=dict(title="z", range=[float(mins[2] - pad[2]), float(maxs[2] + pad[2])]),
             aspectmode="cube",
         ),
+        xaxis2=dict(title="Step", range=[float(time_idx[0]), float(time_idx[-1])]),
+        yaxis2=dict(title="Belief", range=[-0.02, 1.02]),
         updatemenus=[
             dict(
                 type="buttons",
@@ -1256,6 +1429,7 @@ def save_animation_html(
             )
         ],
         legend=dict(x=0.02, y=0.98),
+        margin=dict(l=20, r=20, t=60, b=20),
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.write_html(str(output_path), include_plotlyjs="cdn")
@@ -1465,6 +1639,7 @@ def main() -> None:
                 rollout=rollout,
                 output_path=args.save_animation_html,
                 title=args.figure_title,
+                true_type=true_type,
             )
             if not args.quiet:
                 print(f"saved_html       : {args.save_animation_html}")
