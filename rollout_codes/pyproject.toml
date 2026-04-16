@@ -1,0 +1,21 @@
+[project]
+name = "hexner-mod-3d-rollout-bundle"
+version = "0.1.0"
+description = "Checkpoint-driven 3D Hexner-mod rollout bundle"
+readme = "README.md"
+requires-python = "==3.12"
+dependencies = [
+    "matplotlib>=3.7",
+    "numpy>=1.24",
+    "plotly>=6.7.0",
+    "torch>=2.2",
+    "tqdm>=4.67.1",
+]
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["MPC_2p0s1*"]
