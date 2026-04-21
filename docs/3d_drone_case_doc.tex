@@ -1,0 +1,619 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsfonts,bm}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{hyperref}
+
+\title{Amortized Alpha Training for the 3D Hexner-Mod Low-Running-Cost Velocity Case}
+\author{}
+\date{}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\DeltaI}{\Delta(\mathcal I)}
+\newcommand{\softmax}{\operatorname{softmax}}
+
+\begin{document}
+\setcounter{MaxMatrixCols}{20}
+\maketitle
+
+\section{Purpose and Run Identifier}
+
+This note documents the 3D amortized Hexner-mod experiment stored in
+\[
+\texttt{runs/hexner\_mod\_3d\_amortized\_vel\_low\_running\_cost}.
+\]
+The run uses the original target-based 3D Hexner-mod game
+(\texttt{HexnerMod3DOriginalGame}) with two hidden payoff types, zero terminal
+velocity penalties, and reduced running-control penalties.  The learned object
+is an amortized public signaling policy
+\[
+    f_\psi : (x_0,p_0) \mapsto \alpha,
+\]
+where $x_0$ is the initial joint state, $p_0$ is the initial public belief over
+types, and $\alpha$ is a full public-tree signaling policy.
+
+The checkpoint metadata for this run reports:
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Quantity & Value \\
+\midrule
+Horizon & $T=1.0$ \\
+Number of time steps & $K=10$ \\
+Step size & $\tau = T/K = 0.1$ \\
+Number of types & $I=2$ \\
+Training iterations & $2000$ \\
+Final checkpoint step & $1999$ \\
+Batch size & $32$ \\
+Optimizer & Adam \\
+Learning rate & $10^{-3}$ \\
+Network hidden layer & one hidden layer of width $64$ \\
+Activation & SiLU \\
+Dropout & $0$ \\
+Training device/dtype & CPU, \texttt{float32} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{3D Game Setting}
+
+\subsection{State, Controls, and Dynamics}
+
+Each player has a 3D double-integrator state.  For player $j \in \{1,2\}$,
+\[
+    x_j =
+    \begin{bmatrix}
+        p_{j,x} & p_{j,y} & p_{j,z} &
+        v_{j,x} & v_{j,y} & v_{j,z}
+    \end{bmatrix}^{\!\top}
+    \in \R^6.
+\]
+The full state is the stacked vector
+\[
+    x =
+    \begin{bmatrix}
+        x_1 \\ x_2
+    \end{bmatrix}
+    \in \R^{12}.
+\]
+Player 1's acceleration control is $u \in \R^3$, and player 2's acceleration
+control is $v \in \R^3$.
+
+The discrete-time dynamics are
+\[
+    x_{k+1} = A x_k + B_1 u_k + B_2 v_k,
+\]
+where
+\[
+    A =
+    \begin{bmatrix}
+        A_p & 0 \\
+        0 & A_p
+    \end{bmatrix},
+    \qquad
+    B_1 =
+    \begin{bmatrix}
+        B_p \\ 0
+    \end{bmatrix},
+    \qquad
+    B_2 =
+    \begin{bmatrix}
+        0 \\ B_p
+    \end{bmatrix}.
+\]
+The per-player double-integrator matrices are
+\[
+    A_p =
+    \begin{bmatrix}
+        I_3 & \tau I_3 \\
+        0 & I_3
+    \end{bmatrix},
+    \qquad
+    B_p =
+    \begin{bmatrix}
+        \frac{1}{2}\tau^2 I_3 \\
+        \tau I_3
+    \end{bmatrix}.
+\]
+Thus player 1's state is driven only by $u_k$, and player 2's state is driven
+only by $v_k$.
+
+\subsection{Hidden Types and Type-Dependent Targets}
+
+There are two hidden payoff types,
+\[
+    \theta_0=-1,\qquad \theta_1=+1.
+\]
+The base target vector is
+\[
+    z =
+    \begin{bmatrix}
+        1 & 1 & 0 & 0 & 0 & 0
+    \end{bmatrix}^{\!\top}.
+\]
+Therefore the type-dependent target state for each player is
+\[
+    z_i = \theta_i z.
+\]
+Explicitly,
+\[
+    z_0 =
+    \begin{bmatrix}
+        -1 & -1 & 0 & 0 & 0 & 0
+    \end{bmatrix}^{\!\top},
+    \qquad
+    z_1 =
+    \begin{bmatrix}
+        1 & 1 & 0 & 0 & 0 & 0
+    \end{bmatrix}^{\!\top}.
+\]
+The $z$-coordinate target is zero for both types, so the landing plane is
+$p_z=0$.  The terminal velocity target is also zero in all three velocity
+directions.
+
+\subsection{Running Cost and the ``Low Running Cost'' Setting}
+
+The game is zero-sum.  For a fixed type $i$, the one-step running cost has the
+form
+\[
+    \ell_i(u_k,v_k)
+    =
+    \frac{1}{2} u_k^\top R_i u_k
+    -
+    \frac{1}{2} v_k^\top S_i v_k.
+\]
+The matrices are type-independent in this run, so $R_i=R$ and $S_i=S$ for
+both types.  The base matrices in code are
+\[
+    R_{\text{base}} =
+    \operatorname{diag}(0.05,\,0.025,\,0.05),
+    \qquad
+    S_{\text{base}} =
+    \operatorname{diag}(0.05,\,0.10,\,0.05).
+\]
+The run uses
+\[
+    \texttt{R1\_scale}=0.25,
+    \qquad
+    \texttt{R2\_scale}=0.10.
+\]
+The implementation stores the matrices used by the solver as
+\[
+    R = 2 \cdot \texttt{R1\_scale} \cdot R_{\text{base}},
+    \qquad
+    S = 2 \cdot \texttt{R2\_scale} \cdot S_{\text{base}}.
+\]
+Therefore the actual running-cost matrices are
+\[
+    R =
+    \operatorname{diag}(0.025,\,0.0125,\,0.025),
+    \qquad
+    S =
+    \operatorname{diag}(0.010,\,0.020,\,0.010).
+\]
+Relative to the default original 3D setting, these are lower effort penalties.
+The practical effect is that both players can use larger accelerations at a
+lower running-cost price.  This is why the run name contains
+\texttt{low\_running\_cost}.
+
+The action bounds stored in the config are
+\[
+    u_k \in [-14,14]^3,
+    \qquad
+    v_k \in [-14,14]^3.
+\]
+The current Riccati training path computes the unconstrained LQ saddle policy;
+these bounds are available for downstream clipping during rollout if desired.
+
+\subsection{Terminal Cost, Landing Plane, and Zero Final Velocity}
+
+For type $i$, the terminal cost is
+\[
+    g_i(x_T)
+    =
+    (x_{1,T}-z_i)^\top K_{1,i}(x_{1,T}-z_i)
+    -
+    (x_{2,T}-z_i)^\top K_{2,i}(x_{2,T}-z_i).
+\]
+This says that player 1 is penalized for missing the type-dependent target,
+while player 2 enters with the opposite sign because this is a zero-sum game.
+For this run,
+\[
+    K_{1,i}=K_{2,i}=D_i.
+\]
+The terminal diagonal weights are
+\[
+    D_0 =
+    \operatorname{diag}(1,\,20,\,20,\,20,\,20,\,20),
+\]
+\[
+    D_1 =
+    \operatorname{diag}(20,\,1,\,20,\,20,\,20,\,20).
+\]
+The first three entries correspond to terminal position error
+$(p_x,p_y,p_z)$, and the last three entries correspond to terminal velocity
+error $(v_x,v_y,v_z)$.
+
+The important velocity-condition setting is
+\[
+    \texttt{terminal\_velocity\_scale}=20.
+\]
+Thus every final velocity component has terminal weight $20$.  In expanded
+form, for a generic single-player terminal state
+\[
+    \xi =
+    \begin{bmatrix}
+        p_x & p_y & p_z & v_x & v_y & v_z
+    \end{bmatrix}^{\!\top},
+\]
+the type-0 single-player target cost is
+\[
+\begin{aligned}
+    \phi_0(\xi)
+    &=
+    (\xi-z_0)^\top D_0(\xi-z_0) \\
+    &=
+    (p_x+1)^2
+    +20(p_y+1)^2
+    +20p_z^2
+    +20v_x^2
+    +20v_y^2
+    +20v_z^2,
+\end{aligned}
+\]
+and the type-1 single-player target cost is
+\[
+\begin{aligned}
+    \phi_1(\xi)
+    &=
+    (\xi-z_1)^\top D_1(\xi-z_1) \\
+    &=
+    20(p_x-1)^2
+    +(p_y-1)^2
+    +20p_z^2
+    +20v_x^2
+    +20v_y^2
+    +20v_z^2.
+\end{aligned}
+\]
+Therefore the full terminal cost is
+\[
+    g_i(x_T)=\phi_i(x_{1,T})-\phi_i(x_{2,T}).
+\]
+
+This terminal objective has three notable features:
+\begin{enumerate}[label=(\roman*)]
+    \item The target location depends on the hidden type through
+    $z_i=\theta_i z$.
+    \item The landing plane is type-independent and equals $p_z=0$.
+    \item Zero terminal velocity is enforced softly through the large velocity
+    weights $20v_x^2+20v_y^2+20v_z^2$.
+\end{enumerate}
+
+\subsection{Default Initial State}
+
+The default initial state used in the run metadata is
+\[
+    x_{\mathrm{ref}} =
+    \begin{bmatrix}
+    -1 & 0 & 1 & 0 & 0 & 0 &
+     1 & 0 & 1 & 0 & 0 & 0
+    \end{bmatrix}^{\!\top}.
+\]
+Thus player 1 starts at position $(-1,0,1)$ with zero velocity, while player 2
+starts at $(1,0,1)$ with zero velocity.  Both begin at altitude $p_z=1$ and are
+asked to land at $p_z=0$ with zero final velocity.
+
+\section{Public Tree, Signaling Policy, and Belief Updates}
+
+\subsection{Public Prototype Tree}
+
+The game has $I=2$ hidden types and also uses $I=2$ public prototype branches
+at each node.  The public tree has depth $K=10$.  A node at depth $k$ is
+identified by a public prototype history
+\[
+    \omega_k=(a_0,a_1,\ldots,a_{k-1}),
+    \qquad
+    a_t \in \{0,1\}.
+\]
+There are $2^k$ nodes at depth $k$.  The tree indexer uses the recursion
+\[
+    \operatorname{child}(k,\omega,a) = 2\omega + a
+\]
+in local integer indexing.
+
+\subsection{Alpha as a Type-Conditioned Public Signaling Strategy}
+
+At each depth $k$, node $\omega$, and type $i$, the policy chooses a public
+prototype $a$ according to
+\[
+    \alpha_{k,\omega,i}^{a}
+    =
+    \Pr(a_k=a \mid \omega_k=\omega,\; i).
+\]
+For each fixed $(k,\omega,i)$,
+\[
+    \alpha_{k,\omega,i}^{a}\ge 0,
+    \qquad
+    \sum_{a=0}^{I-1}\alpha_{k,\omega,i}^{a}=1.
+\]
+Intuitively, $\alpha$ is the signaling strategy of the informed player.  Since
+the public branch $a$ is observed, it updates the public belief about the
+hidden type.  The subsequent Riccati solve computes the continuous controls
+associated with every edge $(k,\omega,a)$.
+
+\subsection{Belief Propagation}
+
+Let $p_{k,\omega}(i)$ denote the public belief at node $(k,\omega)$.  Given
+$\alpha_{k,\omega,i}^{a}$, the probability of observing public prototype $a$
+at node $(k,\omega)$ is
+\[
+    \lambda_{k,\omega}^{a}
+    =
+    \sum_{i=0}^{I-1}
+    p_{k,\omega}(i)\alpha_{k,\omega,i}^{a}.
+\]
+After observing $a$, the posterior belief at the child node $(k+1,\omega a)$
+is obtained by Bayes' rule:
+\[
+    p_{k+1,\omega a}(i)
+    =
+    \frac{
+        p_{k,\omega}(i)\alpha_{k,\omega,i}^{a}
+    }{
+        \sum_{j=0}^{I-1}p_{k,\omega}(j)\alpha_{k,\omega,j}^{a}
+    }.
+\]
+The implementation also tracks node masses, but the conditional beliefs above
+are the quantities used to compute belief-averaged costs and policies.
+
+\section{Inner Tree LQ Game for a Fixed \texorpdfstring{$\alpha$}{alpha}}
+
+For a fixed signaling policy $\alpha$, the belief tree is fixed.  At every
+edge $(k,\omega,a)$, the game uses the posterior belief at the child node,
+$p_{k+1,\omega a}$, to compute belief-averaged running costs
+\[
+    \bar R_{k,\omega}^{a}
+    =
+    \sum_i p_{k+1,\omega a}(i) R_i,
+    \qquad
+    \bar S_{k,\omega}^{a}
+    =
+    \sum_i p_{k+1,\omega a}(i) S_i.
+\]
+At terminal leaves, the type-dependent terminal quadratics are also averaged
+under the leaf belief.
+
+The Riccati recursion stores a quadratic value at every node:
+\[
+    V_{k,\omega}(x)
+    =
+    \frac{1}{2}x^\top P_{k,\omega}x
+    +r_{k,\omega}^\top x
+    +c_{k,\omega}.
+\]
+At an edge $(k,\omega,a)$, the local saddle problem is
+\[
+\begin{aligned}
+    \min_u \max_v\quad
+    &\tau\left(
+        \frac{1}{2}u^\top \bar R_{k,\omega}^{a} u
+        -
+        \frac{1}{2}v^\top \bar S_{k,\omega}^{a} v
+    \right) \\
+    &\quad
+    + V_{k+1,\omega a}
+    \left(Ax+B_1u+B_2v\right).
+\end{aligned}
+\]
+Solving this LQ saddle problem gives affine feedback laws
+\[
+    u_{k,\omega}^{a}(x)
+    =
+    K_{u,k,\omega}^{a}x+\kappa_{u,k,\omega}^{a},
+    \qquad
+    v_{k,\omega}^{a}(x)
+    =
+    K_{v,k,\omega}^{a}x+\kappa_{v,k,\omega}^{a}.
+\]
+The optimized edge value is another quadratic,
+\[
+    V_{k,\omega}^{a,\mathrm{edge}}(x)
+    =
+    \frac{1}{2}x^\top P_{k,\omega}^{a}x
+    +(r_{k,\omega}^{a})^\top x
+    +c_{k,\omega}^{a}.
+\]
+The node value averages over public branches using the edge probabilities
+$\lambda_{k,\omega}^{a}$:
+\[
+    V_{k,\omega}(x)
+    =
+    \sum_{a=0}^{I-1}
+    \lambda_{k,\omega}^{a}
+    V_{k,\omega}^{a,\mathrm{edge}}(x).
+\]
+This gives the root value
+\[
+    J(\alpha;x_0,p_0)=V_{0,\emptyset}(x_0).
+\]
+
+\section{Amortized Training}
+
+\subsection{From Direct Alpha Optimization to Amortization}
+
+In a non-amortized solve, one would optimize a separate $\alpha$ tensor for
+one fixed initial condition $(x_0,p_0)$.  Amortized training instead learns a
+single neural network that maps many possible contexts to their corresponding
+signaling policies:
+\[
+    \alpha = f_\psi(x_0,p_0).
+\]
+The network parameters $\psi$ are shared across all sampled initial states and
+beliefs.  At deployment time, a new $(x_0,p_0)$ can be fed through the network
+once to produce a full tree policy.
+
+\subsection{Network Parameterization}
+
+The input is the concatenated vector
+\[
+    h_0 =
+    \begin{bmatrix}
+        x_0 \\ p_0
+    \end{bmatrix}
+    \in \R^{12+2}=\R^{14}.
+\]
+For this run, the network is a one-hidden-layer MLP:
+\[
+    h_1 = \operatorname{SiLU}(W_1h_0+b_1),
+    \qquad
+    \ell = W_2h_1+b_2.
+\]
+The hidden width is $64$.  The output logits $\ell$ are reshaped into
+\[
+    \ell
+    \in
+    \R^{K \times N_{\max}\times I\times I},
+    \qquad
+    K=10,\quad I=2,\quad N_{\max}=2^{10}=1024.
+\]
+Only the first $2^k$ node entries are active at depth $k$; the extra entries
+exist only so that the tensor has a rectangular shape.  The signaling
+probabilities are obtained by a softmax over the final action/prototype axis:
+\[
+    \alpha_{k,\omega,i}^{a}
+    =
+    \frac{
+        \exp(\ell_{k,\omega,i}^{a})
+    }{
+        \sum_{b=0}^{I-1}\exp(\ell_{k,\omega,i}^{b})
+    }.
+\]
+
+\subsection{Sampling Initial States}
+
+Each training batch contains $32$ contexts.  The reference state is
+\[
+    x_{\mathrm{ref}} =
+    \begin{bmatrix}
+    -1 & 0 & 1 & 0 & 0 & 0 &
+     1 & 0 & 1 & 0 & 0 & 0
+    \end{bmatrix}^{\!\top}.
+\]
+For most samples, the position components are perturbed uniformly:
+\[
+    p_{1,0} = p_{1,\mathrm{ref}} + \delta_1,
+    \qquad
+    \delta_1 \sim \operatorname{Unif}([-0.4,0.4]^3),
+\]
+\[
+    p_{2,0} = p_{2,\mathrm{ref}} + \delta_2,
+    \qquad
+    \delta_2 \sim \operatorname{Unif}([-0.4,0.4]^3).
+\]
+The run uses
+\[
+    \texttt{p1\_pos\_jitter}=0.4,
+    \qquad
+    \texttt{p2\_pos\_jitter}=0.4.
+\]
+Velocity jitter is disabled:
+\[
+    \texttt{p1\_vel\_jitter}=0,
+    \qquad
+    \texttt{p2\_vel\_jitter}=0.
+\]
+Thus the initial velocities remain zero in the sampled training contexts.
+
+\subsection{Sampling Initial Beliefs}
+
+For $I=2$, the prior belief is sampled by drawing the probability of type $0$:
+\[
+    p_0(0) \sim \operatorname{Unif}(0.05,0.95),
+    \qquad
+    p_0(1)=1-p_0(0).
+\]
+The lower bound $0.05$ is set by
+\[
+    \texttt{prior\_min}=0.05.
+\]
+This avoids extremely degenerate priors and trains the network over a broad
+range of uncertainty levels.
+
+Additionally, with probability
+\[
+    \texttt{default\_context\_prob}=0.15,
+\]
+a sample in the batch is reset to the default reference context
+\[
+    (x_{\mathrm{ref}},\, [0.5,0.5]).
+\]
+This keeps the canonical scenario represented throughout training while still
+learning over many nearby initial states and beliefs.
+
+\subsection{Training Objective}
+
+For each sampled context $(x_0^{(b)},p_0^{(b)})$, the network predicts
+\[
+    \alpha^{(b)} = f_\psi(x_0^{(b)},p_0^{(b)}).
+\]
+The belief tree is built from $(\alpha^{(b)},p_0^{(b)})$, the belief-averaged
+costs are computed, and the tree-structured Riccati recursion evaluates the
+root value
+\[
+    J_\psi^{(b)}
+    =
+    J(\alpha^{(b)};x_0^{(b)},p_0^{(b)})
+    =
+    V_{0,\emptyset}^{(b)}(x_0^{(b)}).
+\]
+The mini-batch objective is the mean root value:
+\[
+    \mathcal L(\psi)
+    =
+    \frac{1}{B}
+    \sum_{b=1}^{B}
+    J(f_\psi(x_0^{(b)},p_0^{(b)});x_0^{(b)},p_0^{(b)}),
+    \qquad B=32.
+\]
+Training performs gradient descent on $\mathcal L(\psi)$ using Adam with
+learning rate $10^{-3}$ and no weight decay.  Gradients flow through the
+network, belief construction, averaged-cost computation, and Riccati root-value
+computation.
+
+\section{Interpretation of the Low-Running-Cost Velocity Run}
+
+The key choices in this run are:
+\begin{itemize}
+    \item Reduced running-control penalties:
+    \[
+        R=\operatorname{diag}(0.025,0.0125,0.025),
+        \qquad
+        S=\operatorname{diag}(0.010,0.020,0.010).
+    \]
+    These make control effort relatively cheap, so the policy can maneuver more
+    aggressively.
+    \item Strong terminal altitude and velocity penalties:
+    \[
+        20p_z^2 + 20v_x^2 + 20v_y^2 + 20v_z^2
+    \]
+    appear in both types' single-player terminal costs.
+    \item Type-dependent horizontal anisotropy:
+    type $0$ weights $p_y$ heavily and $p_x$ weakly, while type $1$ weights
+    $p_x$ heavily and $p_y$ weakly.
+    \item Amortization over contexts:
+    the learned network is not tied to a single initial state or prior; it is
+    trained over random perturbations of both players' initial positions and
+    random beliefs.
+\end{itemize}
+
+Put together, the experiment learns a context-conditioned public signaling
+policy for a 3D landing game in which both players begin above the landing
+plane, terminal velocity is explicitly discouraged, and controls are cheap
+enough that the learned trajectories can respond strongly to the hidden type,
+belief, and initial geometry.
+
+\end{document}
